@@ -1,0 +1,13 @@
+name = "GRN"
+uuid = "95d5f77b-65ec-463d-8165-8b48baabed35"
+authors = ["Bjarke Poulsen", "Emre Karaman"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.10.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
