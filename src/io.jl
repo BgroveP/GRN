@@ -42,11 +42,3 @@ function write_output(d, o, i; sep='\t')
     print(b, '\n')
     return nothing
 end
-
-#n1 = 10
-#n2 = 200
-#d = (; out=(; Q=copy.(repeat([zeros(Int8, n2)], n1))))
-#o = (; Q=open("testasgfaf.csv", "w"))
-#i = :Q
-#sep = '\t'
-#close(b)

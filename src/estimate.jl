@@ -69,7 +69,8 @@ function grn(Y,
     println.(
         ["Number of individuals: \t\t$individuals",
          "Number of genes:       \t\t$genes",
-         "Number of markers:     \t\t$loci"]
+         "Number of markers:     \t\t$loci",
+         "Number of threads:     \t\t$(nthreads())"]
     )
 
     # Create folder and IO streams
