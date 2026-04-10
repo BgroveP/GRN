@@ -2,7 +2,6 @@ module GRN
 
 # Global variables
 
-
 # Used packages
 using Base.Threads
 using Distributions
@@ -10,6 +9,7 @@ using LinearAlgebra
 using ProgressMeter
 using Random
 using Statistics
+using FLoops
 
 # Includes
 include("estimate.jl")

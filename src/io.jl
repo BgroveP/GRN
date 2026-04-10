@@ -21,21 +21,32 @@ end
 
 function write_output(d, o, i; sep='\t')
     x = d.out[i]
-    D = length(axes(x))
+    D = 1 + (size(x[1], 1) > 1)
     b = o[i]
 
-    for col in axes(x, 2)
-        for row in axes(x, 1)
+    for col in axes(x, 1)
+        for row in axes(x[col], 1)
             if D == 2
-                print(b, x[row, col], sep)
+                print(b, x[col][row])
             else
-                print(b, x[row], sep)
+                print(b, x[row])
             end
+            if (row != size(x[col], 1))
+                print(b, sep)
+            end
+        end
+        if (col != size(x, 1))
+            print(b, sep)
+        end
     end
-end
     print(b, '\n')
     return nothing
 end
 
-
-
+#n1 = 10
+#n2 = 200
+#d = (; out=(; Q=copy.(repeat([zeros(Int8, n2)], n1))))
+#o = (; Q=open("testasgfaf.csv", "w"))
+#i = :Q
+#sep = '\t'
+#close(b)
