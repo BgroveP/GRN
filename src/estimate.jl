@@ -105,7 +105,7 @@ function grn(Y,
 
     # Start analyses
     ## Showprogress gives a progress bar and a timer. I have not experienced slowdowns from it, but could be a culprit.
-    @showprogress for i in 1:last(chain)
+    for i in 1:last(chain)
 
         # Sample parameters
         _sample_mean!(data, Normdist, individuals)
