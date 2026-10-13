@@ -1,24 +1,25 @@
 module GRN
 
-# Global variables
-
 # Used packages
 using Base.Threads
-using Distributions
 using LinearAlgebra
-using ProgressMeter
 using Random
 using Statistics
-using FLoops
+
+# Set number of BLAS threads to one
+BLAS.set_num_threads(1)
 
 # Includes
-include("estimate.jl")
+include("priors.jl")
 include("initialize.jl")
+include("check.jl")
+include("estimate.jl")
 include("io.jl")
 include("sample.jl")
 include("utility.jl")
 
 # Exports
 export grn
+export SpikeSlab, Ridge, Laplace
 
 end
