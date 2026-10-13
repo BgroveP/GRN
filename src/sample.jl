@@ -1,225 +1,325 @@
-"""
+# Gibbs samplers for the gene regulatory network model.
+#
+# All samplers in this file are written to be allocation-free: they operate
+# in place on the databucket and use only scalar operations and scalar
+# random draws. Random draws for the chi-squared, beta, and gamma
+# distributions are generated with a scalar version of the Marsaglia and
+# Tsang (2000) gamma sampler to avoid the per-draw allocations of
+# distribution objects.
 
-    _sample_mean!(d, dist, n)
-
-Update the vector with average effects
-
-# Arguments
- - `d`:     The databucket created with the create_databucket function
- - `dist`:  The distibution that the average effects should be sampled from
- - `n`:     The number of observations
-             
-# Returns
- - `Nothing`: 
+# ---------------------------------------------------------------- Random draws
 
 """
-function _sample_mean!(d, dist, n)
 
-    # Create aliases for temporary vectors
-    random_deviations = d.tmpshared.GFloat1
-    average_deviations = d.tmpshared.GFloat2
-    total_deviations = d.tmpshared.GFloat3
-    residuals = d.in.R
+    _rand_gamma(alpha)
 
-    # Sample deviations
-    rand!(dist, random_deviations)
+Draw from a Gamma(alpha, 1) distribution with the Marsaglia and Tsang (2000)
+method. Scalar operations only, no allocations.
 
-    # Calculate deviations in existing residuals
-    mean!.(eachrow(average_deviations), residuals)
-
-    # Combined observed and sampled deviations
-    total_deviations .= average_deviations + sqrt.(d.out.Rvar ./ n) .* random_deviations
-
-    # Update the average effects
-    d.out.mu .+= total_deviations
-
-    # Update the residuals
-    for i in axes(total_deviations, 1)
-        residuals[i] .-= total_deviations[i]
+"""
+function _rand_gamma(alpha::Float64)::Float64
+    if alpha < 1.0
+        # Boost by one and multiply with a power of a uniform draw
+        u = rand()
+        u <= 0.0 && return 0.0
+        return _rand_gamma(alpha + 1.0) * u^(1.0 / alpha)
     end
-
-    # Return
-    return nothing
-end
-
-"""
-
-   _sample_residualvariance!(d, idist)
-
-Update the vector with residual variances
-
-# Arguments
- - `d`:                     The databucket created with the create_databucket function
- - `idist`:                 The inverse of the distibution that the residual variances should be sampled from
-
- # Internal objects from the d object
- - `d.tmpshared.GFloat1`:   A vector of Float64 values
- - `d.out.Rvarscale`:       A vector of Float64 values with the prior for the residual variance
- - `d.in.R`:                A vector of vectors of Float64 values with residuals
-
-# Returns
- - `Nothing`: 
-
-"""
-function _sample_residualvariance!(d, idist)
-
-    # Create aliases for temporary vectors
-    random_deviations = d.tmpshared.GFloat1
-
-    # Sample deviations
-    rand!(idist, random_deviations)
-
-    # Calculate new residual variances
-    d.out.Rvar .= (d.out.Rvarscale + dot.(d.in.R, d.in.R)) ./ random_deviations
-    
-    # Return
-    return nothing
-end
-
-"""
-
-  _sample_effectvars!(variances, effects, prior_df, n, prior_offset, random_deviations)
-
-Update the vector with variances of gene-gene or marker-gene effects
-
-# Arguments
- - `variances`:             A vector of Float64 values with variances for the focal effect
- - `effects`:               A vector of vectors with Float64 values for the focal effect 
- - `prior_df`:              A vector of Float64 values of the degrees of freedom for the prior variances
- - `n`:                     A vector of Float64 values 
- - `prior_offset`:          A vector of Float64 values of prior degrees of freedom times variance
- - `random_deviations`:     A vector of Float64 values for sampling random values into
-
-# Returns
- - `Nothing`: 
-
-"""
-function _sample_effectvars!(variances, effects, prior_df, n, prior_offset, random_deviations)
-
-    # Sample from the chi distribution into the placeholder vector
-    rand!.(Chisq.(prior_df + n), eachrow(random_deviations))
-
-    # Update the effect variances
-    variances .= (prior_offset + dot.(effects, effects)) ./ random_deviations
-    
-    # Return
-    return nothing
-end
-
-"""
-
-  _sample_effectvars!(variances, effects, prior_df, n, prior_offset, random_deviations)
-
-Update the vector with inclusion probabilities of gene-gene or marker-gene effects.
-Both pi, n, and a are updated.
-
-# Arguments
- - `pi`:                    A vector of Float64 values with inclusion probabilities for the focal effect
- - `indicators`:            A vector of vectors with Bool values for whether the focal effect is not zero
- - `effects`:               A vector of vectors with Float64 values for the focal effect 
- - `n`:                     A vector of Float64 values for the number of times a gene has focal effects that are not zero
- - `a`:                     A vector of Float64 values for the number of times a gene has focal effects that are zero
-
-# Returns
- - `Nothing`: 
-
-"""
-function _sample_pi!(pi, indicators, effects, n, a)
-
-    # Calculate the number of effects per gene
-    sum!.(eachrow(n), indicators)
-
-    # Safeguard against n=0? Not sure
-    n .+= 1
-
-    # Calculate the number of effects that are zero
-    a .= ((2 + size(effects[1], 1)) .- n) # This part of the function can be optimized because it is constant across iterations.
-
-    # Sample new pi from the Beta distribution
-    rand!.(Beta.(n, a), eachrow(pi))
-
-    # Return
-    return nothing
-end
-
-
-function _sample_effect!(c, q, x, r, v0s, v1s, values, w, wi, Wpi, rands, a, ssqX, Rvar, norms, d, tmp)
-
-    # Calculate intermediate values
-    values.dotprod .= dot!(tmp, x, r)
-    values.logD0 .= -0.5 * (log(v0s[q]) + values.dotprod[1]^2 / v0s[q]) + log(1.0 - Wpi[c])
-    values.logD1 .= -0.5 * (log.(v1s[q]) + values.dotprod[1]^2 / v1s[q]) + log(Wpi[c])
-    values.prob .= 1.0 / (1.0 + exp(values.logD0[1] - values.logD1[1]))
-
-
-    wi[q] = rands[q] < values.prob[1]
-    if wi[q] == 1
-        w[q] = values.dotprod[1] / (ssqX[q] + a[c]) + sqrt(Rvar[c] / (ssqX[q] + a[c])) * norms[q]
-        r .-= w[q] * x
-    else
-        w[q] = 0.0
+    d = alpha - 1.0 / 3.0
+    c = 1.0 / sqrt(9.0 * d)
+    while true
+        x = randn()
+        v = (1.0 + c * x)^3
+        v <= 0.0 && continue
+        u = rand()
+        x2 = x * x
+        if u < 1.0 - 0.0331 * x2 * x2
+            return d * v
+        end
+        if log(u) < 0.5 * x2 + d * (1.0 - v + log(v))
+            return d * v
+        end
     end
-    return nothing
 end
 
+_rand_chisq(df::Float64)::Float64 = 2.0 * _rand_gamma(df / 2.0)
 
-function _sample_effectparameters!(d, i, Z, ssqs, Normdist)
+function _rand_beta(a::Float64, b::Float64)::Float64
+    x = _rand_gamma(a)
+    y = _rand_gamma(b)
+    return x / (x + y)
+end
+
+_rand_gamma(alpha::Float64, scale::Float64)::Float64 = scale * _rand_gamma(alpha)
+
+"""
+
+    _rand_invgauss(mu, lambda)
+
+Draw from an InverseGaussian(mu, lambda) distribution with the Michael,
+Schucany, and Haas (1976) algorithm. Scalar operations only, no allocations.
+
+"""
+function _rand_invgauss(mu::Float64, lambda::Float64)::Float64
+    y = randn()
+    y *= y
+    x = mu + mu * mu * y / (2.0 * lambda) -
+        mu / (2.0 * lambda) * sqrt(4.0 * mu * lambda * y + mu * mu * y * y)
+    x = x > 0.0 ? x : mu
+    return rand() <= mu / (mu + x) ? x : mu * mu / x
+end
+
+# ---------------------------------------------------------------- Iteration
+
+# One full Gibbs sweep is embarrassingly parallel over genes: the mean,
+# residual variance, effect, and hyperparameter conditionals of a gene
+# depend only on the data and the residual of that gene. The per-gene
+# updates are therefore fused into a single threaded region, so only one
+# set of tasks is spawned per iteration.
+
+"""
+
+    _sample_iteration!(d, ssqs, individuals, loci)
+
+Perform one Gibbs iteration over all genes, in parallel over contiguous
+chunks of genes.
+
+"""
+function _sample_iteration!(d::NamedTuple, ssqs::NamedTuple,
+    individuals::Int, loci::Int)::Nothing
 
     # Aliases
-    X = d.in[Z]
-    ssqX = ssqs[Z]
-    W = d.out[i]
+    residual_variance::Vector{Float64} = d.out.base.residual_variance
+    G = d.out.G
+    Q = d.out.Q
+    Xg::Vector{Vector{Float64}} = d.in.Y
+    Xm::Vector{Vector{Float64}} = d.in.M
+    R::Vector{Vector{Float64}} = d.in.R
+    ssqg::Vector{Float64} = ssqs.Y
+    ssqm::Vector{Float64} = ssqs.M
+    chunks::Vector{Vector{Int}} = d.tmpshared.split_chunks
 
-    n = d.tmpshared.GFloat1 .= 0
-    Rvar = d.out.Rvar
-    a = d.tmpshared.GFloat2 .= Rvar ./ d.out[Symbol.(String(i) .* "var")]
-    R = d.in.R
-    Wvar = d.out[Symbol(string(i) * "var")]
-    Wvardf = d.out[Symbol(string(i) * "vardf")]
-    Wvarscale = d.out[Symbol(string(i) * "varscale")]
-    Wi = d.out[Symbol(string(i) * "i")]
-    Wpi = d.out[Symbol(string(i) * "pi")]
-    candidates = d.out.candidates[i]
+    # Work per parallel task
+    @threads for s in eachindex(chunks)
+        @inbounds for c in chunks[s]
 
-    # Prepare for multithreading
-    nsplit = min(nthreads(), size(W, 1))
-    tchunks = split_vector(axes(W, 1), nsplit)
+            # Base
+            _sample_mean!(d, c, individuals)
+            _sample_residualvariance!(d, c)
 
-    # Work per thread
-    @floop for s in 1:nsplit
-        v0s = (Z == :M) ? d.tmpthread[s].QFloat1 : d.tmpthread[s].GFloat1
-        v1s = (Z == :M) ? d.tmpthread[s].QFloat2 : d.tmpthread[s].GFloat2
-        rands = (Z == :M) ? d.tmpthread[s].QFloat3 : d.tmpthread[s].GFloat3
-        norms = (Z == :M) ? d.tmpthread[s].QFloat4 : d.tmpthread[s].GFloat4
-        tmp = d.tmpthread[s].IFloat1 
-        values = d.tmpthread[s].values
+            # Gene-gene effects
+            _sample_effects_gene!(G, c, Xg, ssqg, R, residual_variance)
+            _sample_hyperparameters_gene!(G, c, residual_variance)
 
-        # Work per gene
-        for c in tchunks[s]
-            v0s .= ssqX * Rvar[c]
-            v1s .= ((ssqX .^ 2) * Wvar[c]) .+ v0s
-            r = R[c]
-            rand!(rands)
-            rand!(Normdist, norms)
-            w = W[c]
-            wi = Wi[c]
-
-            # Work per effect
-            for q in candidates[c]
-                @views x = X[:, q]
-                r .+= w[q] .* x
-                _sample_effect!(c, q, x, r, v0s, v1s, values, w, wi, Wpi, rands, a, ssqX, Rvar, norms, d, tmp)
+            # Marker-gene effects
+            if loci > 0
+                _sample_effects_gene!(Q, c, Xm, ssqm, R, residual_variance)
+                _sample_hyperparameters_gene!(Q, c, residual_variance)
             end
         end
     end
 
-    # Sample inclusion probabilities
-    _sample_pi!(Wpi, Wi, W, n, a)
+    return nothing
+end
 
-    # Sample variances
-	### This order is very important here, as "n" is updated in sample_pi which comes before... Could they be independent???
-    _sample_effectvars!(Wvar, W, Wvardf, n, Wvarscale, a)
+# ---------------------------------------------------------------- Mean
 
-    # Return nothing
+"""
+
+    _sample_mean!(d, c, n)
+
+Update the average gene expression (`mu`) of gene `c` and adjust the
+residual accordingly. Conditional posterior: mu | Rvar, R is normal with
+mean `mean(R)` and variance `Rvar / n`.
+
+"""
+function _sample_mean!(d::NamedTuple, c::Int, n::Int)::Nothing
+    deviation = mean(d.in.R[c]) + sqrt(d.out.base.residual_variance[c] / n) * randn()
+    d.out.base.average[c] += deviation
+    d.in.R[c] .-= deviation
+    return nothing
+end
+
+# ---------------------------------------------------------------- Residual variance
+
+"""
+
+    _sample_residualvariance!(d, c)
+
+Update the residual variance of gene `c` from the scaled inverse
+chi-squared posterior: Rvar | R ~ scale-chi2(Rvarscale + R'R, df + n).
+
+"""
+function _sample_residualvariance!(d::NamedTuple, c::Int)::Nothing
+    r = d.in.R[c]
+    d.out.base.residual_variance[c] = (d.out.base.residual_variancescale[c] + dot(r, r)) /
+        _rand_chisq(d.out.base.residual_df[c] + length(r))
+    return nothing
+end
+
+# ---------------------------------------------------------------- Effects
+
+# The per-effect Gibbs update has the same structure for all priors:
+#  1. Add the current effect back into the residual
+#  2. Compute the dot product between predictor and residual
+#  3. Draw the new effect from its conditional posterior
+#  4. Remove the new effect from the residual
+# Only step 3 differs between priors, and the shared steps are inlined
+# in each specialization below to keep the hot loop type-stable.
+
+# Spike-and-slab: sample the indicator from the mixture posterior, then the
+# effect from the slab if included.
+function _sample_effects_gene!(st::SpikeSlabState, c::Int,
+    X::Vector{Vector{Float64}}, ssqX::Vector{Float64},
+    R::Vector{Vector{Float64}}, Rvar::Vector{Float64})::Nothing
+
+    # Aliases
+    w::Vector{Float64} = st.effects[c]
+    wi::Vector{Int8} = st.indicator[c]
+    r::Vector{Float64} = R[c]
+    rvar::Float64 = Rvar[c]
+    varc::Float64 = st.var[c]
+    pic::Float64 = st.pi[c]
+    candidates::Vector{Int} = st.candidates[c]
+
+    # Work per effect
+    @inbounds for q in candidates
+        x::Vector{Float64} = X[q]
+        wq::Float64 = w[q]
+        wq != 0.0 && (r .+= wq .* x)
+        dotprod::Float64 = dot(x, r)
+        v0::Float64 = ssqX[q] * rvar
+        v1::Float64 = ssqX[q] * (ssqX[q] * varc + rvar)
+        logD0::Float64 = -0.5 * (log(v0) + dotprod * dotprod / v0) + log(1.0 - pic)
+        logD1::Float64 = -0.5 * (log(v1) + dotprod * dotprod / v1) + log(pic)
+        wi[q] = rand() < 1.0 / (1.0 + exp(logD0 - logD1))
+        if wi[q] == 1
+            prec::Float64 = ssqX[q] + rvar / varc
+            wq = dotprod / prec + sqrt(rvar / prec) * randn()
+            w[q] = wq
+            r .-= wq .* x
+        else
+            w[q] = 0.0
+        end
+    end
+
+    return nothing
+end
+
+# Ridge: all effects included, conjugate normal conditional posterior.
+function _sample_effects_gene!(st::RidgeState, c::Int,
+    X::Vector{Vector{Float64}}, ssqX::Vector{Float64},
+    R::Vector{Vector{Float64}}, Rvar::Vector{Float64})::Nothing
+
+    # Aliases
+    w::Vector{Float64} = st.effects[c]
+    r::Vector{Float64} = R[c]
+    rvar::Float64 = Rvar[c]
+    precision::Float64 = rvar / st.var[c]
+    candidates::Vector{Int} = st.candidates[c]
+
+    # Work per effect
+    @inbounds for q in candidates
+        x::Vector{Float64} = X[q]
+        wq::Float64 = w[q]
+        wq != 0.0 && (r .+= wq .* x)
+        prec::Float64 = ssqX[q] + precision
+        wq = dot(x, r) / prec + sqrt(rvar / prec) * randn()
+        w[q] = wq
+        r .-= wq .* x
+    end
+
+    return nothing
+end
+
+# Laplace: scale mixture of normals with per-effect local variance tau2.
+# The conditional posterior of the effect is normal with precision
+# ssqX + 1 / tau2 (prior variance Rvar * tau2).
+function _sample_effects_gene!(st::LaplaceState, c::Int,
+    X::Vector{Vector{Float64}}, ssqX::Vector{Float64},
+    R::Vector{Vector{Float64}}, Rvar::Vector{Float64})::Nothing
+
+    # Aliases
+    w::Vector{Float64} = st.effects[c]
+    tau2::Vector{Float64} = st.tau2[c]
+    r::Vector{Float64} = R[c]
+    rvar::Float64 = Rvar[c]
+    candidates::Vector{Int} = st.candidates[c]
+
+    # Work per effect
+    @inbounds for q in candidates
+        x::Vector{Float64} = X[q]
+        wq::Float64 = w[q]
+        wq != 0.0 && (r .+= wq .* x)
+        prec::Float64 = ssqX[q] + 1.0 / tau2[q]
+        wq = dot(x, r) / prec + sqrt(rvar / prec) * randn()
+        w[q] = wq
+        r .-= wq .* x
+    end
+
+    return nothing
+end
+
+# ---------------------------------------------------------------- Hyperparameters
+
+# Spike-and-slab: sample the inclusion probability from the beta posterior
+# and the prior effect variance from the scaled inverse chi-squared
+# posterior, per gene.
+function _sample_hyperparameters_gene!(st::SpikeSlabState, c::Int, ::Vector{Float64})::Nothing
+
+    # Aliases
+    w::Vector{Float64} = st.effects[c]
+    wi::Vector{Int8} = st.indicator[c]
+    n::Float64 = sum(wi)
+
+    # Sample the inclusion probability and the prior effect variance
+    st.pi[c] = _rand_beta(n + 1.0, length(w) - n + 1.0)
+    st.var[c] = (st.varscale[c] + dot(w, w)) / _rand_chisq(st.vardf[c] + n)
+
+    return nothing
+end
+
+# Ridge: sample the prior effect variance with all effects counted as
+# included.
+function _sample_hyperparameters_gene!(st::RidgeState, c::Int, ::Vector{Float64})::Nothing
+
+    w::Vector{Float64} = st.effects[c]
+    st.var[c] = (st.varscale[c] + dot(w, w)) /
+        _rand_chisq(st.vardf[c] + length(st.candidates[c]))
+
+    return nothing
+end
+
+# Laplace (Park and Casella, 2008): sample the local variances tau2 from
+# an inverse Gaussian distribution and the penalty lambda2 per gene from a
+# gamma distribution. The residual variances enter the conditionals, so the
+# prior variance of an effect is Rvar * tau2.
+function _sample_hyperparameters_gene!(st::LaplaceState, c::Int,
+    Rvar::Vector{Float64})::Nothing
+
+    # Aliases
+    w::Vector{Float64} = st.effects[c]
+    tau2::Vector{Float64} = st.tau2[c]
+    rvar::Float64 = Rvar[c]
+    lambda2::Float64 = st.lambda2[c]
+    candidates::Vector{Int} = st.candidates[c]
+
+    # Sample the local variances
+    s::Float64 = 0.0
+    @inbounds for q in candidates
+        wq::Float64 = w[q]
+        s += tau2[q]
+        if abs(wq) > 1e-300
+            # tau2 | w, lambda2, Rvar is 1 / InverseGaussian
+            mu::Float64 = sqrt(lambda2 * rvar / (wq * wq))
+            tau2[q] = 1.0 / _rand_invgauss(mu, lambda2)
+        else
+            # Limiting case: Gamma(1/2, rate lambda2 / 2)
+            tau2[q] = _rand_gamma(0.5, 2.0 / lambda2)
+        end
+    end
+
+    # Sample the penalty: lambda2 | tau2 ~ Gamma(a + p, rate = b + sum(tau2) / 2)
+    st.lambda2[c] = _rand_gamma(st.a[c] + length(candidates), 1.0 / (st.b[c] + s / 2.0))
+
     return nothing
 end

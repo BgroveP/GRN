@@ -1,28 +1,24 @@
-function split_vector(x::Union{UnitRange{Int},AbstractVector,Base.OneTo{Int64}}, n::Int)
+function split_vector(x::AbstractVector{Int}, n::Int)::Vector{Vector{Int}}
 
-    otype = typeof(x) == Base.OneTo{Int64} ? UnitRange{Int} : typeof(x)
-    y = Vector{otype}(undef, n)
+    y = Vector{Vector{Int}}(undef, n)
     z::Int = length(x)
     r::Int = z
     for i in eachindex(y)
-        thistake = ((z-r+1):z)[1:(Int(ceil(r / (n + 1 - i))))]
-        y[i] = x[thistake]
+        thistake = ((z - r + 1):z)[1:(Int(ceil(r / (n + 1 - i))))]
+        y[i] = collect(x[thistake])
         r = r - length(thistake)
     end
     return y
 end
 
+function mat2vv(X::Matrix{Float64}, center::Bool=true)::Vector{Vector{Float64}}
 
-function dot!(z, x, y)
-    z .= x .* y
-    return sum(z)
-end
+    vv = [copy(v) for v in eachcol(X)]
 
-function indicator2indice(v)
-    for i in axes(v, 1)
-        b = v[i]
-        deleteat!(b, i)
+    if center
+        for i in axes(vv, 1)
+            vv[i] .-= mean(vv[i])
+        end
     end
-    return v
+    return vv
 end
-
