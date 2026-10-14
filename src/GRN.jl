@@ -5,11 +5,13 @@ using Base.Threads
 using LinearAlgebra
 using Random
 using Statistics
+using DelimitedFiles
 
 # Set number of BLAS threads to one
 BLAS.set_num_threads(1)
 
 # Includes
+include("accuracy.jl")
 include("priors.jl")
 include("initialize.jl")
 include("check.jl")
