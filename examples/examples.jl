@@ -9,17 +9,16 @@ Y = readdlm("$(pkgroot)/data/Y.csv", ',');
 M = readdlm("$(pkgroot)/data/M.csv", ',');
 
 # Spike-and-slab priors, no other priors
-grn(Y, M, 10000:50:100000, outpath = "examples/grn_example", overwrite = true)
+@time grn(Y, M, 10000:50:100000, outpath = "examples/grn_example", overwrite = true)
 
 # Spike-and-slab priors, with hyperparameter priors
-grn(Y, M, 10000:50:100000, outpath = "examples/grn_example2", overwrite = true, priors = (Gpi = 0.01, Qpi = 0.01, Rvar = 0.01))
+@time grn(Y, M, 10000:50:100000, outpath = "examples/grn_example2", overwrite = true, priors = (Gpi = 0.01, Qpi = 0.01, Rvar = 0.01))
 
-# Bayesian lasso prior for the gene-gene effects, ridge prior for the
-# marker-gene effects
-grn(Y, M, 10000:50:100000, outpath = "examples/grn_example3", overwrite = true, priors = (Gprior = Laplace(), Qprior = Ridge()))
+# Bayesian ridge prior for the gene-gene effects, lasso prior for the marker-gene effects
+@time grn(Y, M, 10000:50:100000, outpath = "examples/grn_example3", overwrite = true, priors = (Gprior = Ridge(), Qprior = Laplace()))
 
 # Pure Ridge regression
-grn(Y, M, 10000:50:100000, outpath = "examples/grn_example4", overwrite = true, priors = (Gprior = Ridge(), Qprior = Ridge()))
+@time grn(Y, M, 10000:50:100000, outpath = "examples/grn_example4", overwrite = true, priors = (Gprior = Ridge(), Qprior = Ridge()))
 
 
 # Accuracies
