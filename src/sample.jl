@@ -4,7 +4,8 @@
 # in place on the databucket and use only scalar operations and scalar
 # random draws. Random draws for the chi-squared, beta, and gamma
 # distributions are generated with a scalar version of the Marsaglia and
-# Tsang (2000) gamma sampler to avoid the per-draw allocations of
+# Tsang (2000) gamma sampler ("A Simple Method for Generating Gamma
+# Variables", ACM TOMS) to avoid the per-draw allocations of
 # distribution objects.
 
 # ---------------------------------------------------------------- Random draws
@@ -13,8 +14,9 @@
 
     _rand_gamma(alpha)
 
-Draw from a Gamma(alpha, 1) distribution with the Marsaglia and Tsang (2000)
-method. Scalar operations only, no allocations.
+Draw from a Gamma(alpha, 1) distribution with the Marsaglia and Tsang
+(2000) squeeze-rejection method ("A Simple Method for Generating Gamma
+Variables", ACM TOMS). Scalar operations only, no allocations.
 
 """
 function _rand_gamma(alpha::Float64)::Float64
@@ -67,14 +69,6 @@ function _rand_invgauss(mu::Float64, lambda::Float64)::Float64
     x = x > 0.0 ? x : mu
     return rand() <= mu / (mu + x) ? x : mu * mu / x
 end
-
-# ---------------------------------------------------------------- Iteration
-
-# One full Gibbs sweep is embarrassingly parallel over genes: the mean,
-# residual variance, effect, and hyperparameter conditionals of a gene
-# depend only on the data and the residual of that gene. The per-gene
-# updates are therefore fused into a single threaded region, so only one
-# set of tasks is spawned per iteration.
 
 """
 

@@ -11,7 +11,7 @@ using DelimitedFiles
 BLAS.set_num_threads(1)
 
 # Includes
-include("accuracy.jl")
+include("postanalysis.jl")
 include("priors.jl")
 include("initialize.jl")
 include("check.jl")
