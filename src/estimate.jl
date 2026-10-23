@@ -24,6 +24,7 @@ a matrix with genotypes.
  - `priors`:        The priors given for the analysis                                                                   (NamedTuple)
  - `outpath`:       The relative path to the folder for output files                                                    (String)
  - `overwrite`:     Denotes whether an existing outpath should be overwritten                                           (Bool)
+ - `compress`:      Write gzip-compressed `.tsv.gz` files (default, level 1, fast). Set to `false` for plain `.tsv`.  (Bool)
 
 # Priors
  The prior for gene-gene (G) and marker-gene (Q) effects is selected with
@@ -49,7 +50,6 @@ a matrix with genotypes.
 
  Priors related to gene-gene effects (replace `G` with `Q` for marker-gene effects)
  - `Geffects`:      An *m* × *m* dimensional matrix of effects                                                          (Float64)
- - `Gindicator`:    An *m* dimensional vector of **m** dimensional vectors of whether an effect is not zero             (Int8)
  - `Gpi`:          An *m* dimensional vector of the probability that an effect is not zero                             (Float64)
  - `Gvar`:          An *m* dimensional vector of variances for effects                                                  (Float64)
  - `Gvardf`:        An *m* dimensional vector of degrees of freedom for the prior variance                              (Float64)
@@ -70,7 +70,7 @@ function grn(Y::Matrix{Float64},
     priors::NamedTuple=(;),
     outpath::AbstractString="grn",
     overwrite::Bool=false,
-    compress::Bool=false)
+    compress::Bool=true)
 
     # Check input
     _checkinput(Y, M, chain)
@@ -138,8 +138,10 @@ end
 function grn(Y::Matrix{Float64}, chain::AbstractRange{Int};
     priors::NamedTuple=(;),
     outpath::AbstractString="grn",
-    overwrite::Bool=false)
-    return grn(Y, zeros(0, 0), chain; priors=priors, outpath=outpath, overwrite=overwrite)
+    overwrite::Bool=false,
+    compress::Bool=true)
+    return grn(Y, zeros(0, 0), chain; priors=priors, outpath=outpath, overwrite=overwrite,
+        compress=compress)
 end
 
 """
@@ -148,7 +150,9 @@ end
 
 Collect the output objects of the data bucket into a flat NamedTuple with
 one entry per output file. The keys become the file names. The marker-gene
-group is skipped when there are no marker loci.
+group is skipped when there are no marker loci. Indicator matrices are not
+included — the posterior inclusion probability can be derived exactly from
+the effects files with `GRN.posterior_inclusion_probability`.
 
 """
 function _outputs(d::NamedTuple, loci::Int)::NamedTuple

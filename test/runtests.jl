@@ -5,11 +5,17 @@ using Statistics
 using Test
 using GZip
 
-# Helper: read an output file as a matrix with a given number of values per line
+# Helper: read an output file as a matrix with a given number of values per line.
+# Handles both plain .tsv and gzip-compressed .tsv.gz files.
 function readoutput(p, ncols)
     isfile(p) || error("Missing output file $p")
-    v = [parse(Float64, t) for ln in readlines(p) for t in split(ln, '\t') if !isempty(t)]
-    return reshape(v, ncols, :)'
+    io = endswith(p, ".gz") ? GZip.open(p) : open(p)
+    try
+        v = [parse(Float64, t) for ln in eachline(io) for t in split(ln, '\t') if !isempty(t)]
+        return reshape(v, ncols, :)'
+    finally
+        close(io)
+    end
 end
 
 # Simulate data with a known network. B[i, j] is the effect of gene i on
@@ -88,46 +94,181 @@ end
         Random.seed!(2)
         Y, M, B, = simulate()
 
-        # Run all prior combinations
+        # Run all prior combinations (compressed by default)
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "ss"))
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "lr"),
             priors=(Gprior=Laplace(), Qprior=Ridge()))
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "rl"),
             priors=(Gprior=Ridge(), Qprior=Laplace()))
 
-        # Spike-and-slab output
-        @test size(readoutput(joinpath(testdir, "ss", "G_effects.tsv"), 25)) == (51, 25)
-        @test size(readoutput(joinpath(testdir, "ss", "G_indicator.tsv"), 25)) == (51, 25)
-        @test size(readoutput(joinpath(testdir, "ss", "G_pi.tsv"), 5)) == (51, 5)
-        @test size(readoutput(joinpath(testdir, "ss", "G_variance.tsv"), 5)) == (51, 5)
-        @test size(readoutput(joinpath(testdir, "ss", "Q_effects.tsv"), 50)) == (51, 50)
-        @test size(readoutput(joinpath(testdir, "ss", "base_average.tsv"), 5)) == (51, 5)
-        @test all(isfinite, readoutput(joinpath(testdir, "ss", "G_variance.tsv"), 5))
+        # Spike-and-slab output (compressed .tsv.gz, no indicator file)
+        @test size(readoutput(joinpath(testdir, "ss", "G_effects.tsv.gz"), 25)) == (51, 25)
+        @test !isfile(joinpath(testdir, "ss", "G_indicator.tsv.gz"))
+        @test !isfile(joinpath(testdir, "ss", "G_effects.tsv"))
+        @test size(readoutput(joinpath(testdir, "ss", "G_pi.tsv.gz"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "ss", "G_variance.tsv.gz"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "ss", "Q_effects.tsv.gz"), 50)) == (51, 50)
+        @test size(readoutput(joinpath(testdir, "ss", "base_average.tsv.gz"), 5)) == (51, 5)
+        @test all(isfinite, readoutput(joinpath(testdir, "ss", "G_variance.tsv.gz"), 5))
 
         # Laplace output
-        @test size(readoutput(joinpath(testdir, "lr", "G_effects.tsv"), 25)) == (51, 25)
-        @test size(readoutput(joinpath(testdir, "lr", "G_tau2.tsv"), 25)) == (51, 25)
-        @test size(readoutput(joinpath(testdir, "lr", "G_lambda2.tsv"), 5)) == (51, 5)
-        @test all(readoutput(joinpath(testdir, "lr", "G_tau2.tsv"), 25) .> 0)
-        @test all(readoutput(joinpath(testdir, "lr", "G_lambda2.tsv"), 5) .> 0)
+        @test size(readoutput(joinpath(testdir, "lr", "G_effects.tsv.gz"), 25)) == (51, 25)
+        @test size(readoutput(joinpath(testdir, "lr", "G_tau2.tsv.gz"), 25)) == (51, 25)
+        @test size(readoutput(joinpath(testdir, "lr", "G_lambda2.tsv.gz"), 5)) == (51, 5)
+        @test all(readoutput(joinpath(testdir, "lr", "G_tau2.tsv.gz"), 25) .> 0)
+        @test all(readoutput(joinpath(testdir, "lr", "G_lambda2.tsv.gz"), 5) .> 0)
 
         # Ridge output
-        @test size(readoutput(joinpath(testdir, "rl", "G_effects.tsv"), 25)) == (51, 25)
-        @test size(readoutput(joinpath(testdir, "rl", "G_variance.tsv"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "rl", "G_effects.tsv.gz"), 25)) == (51, 25)
+        @test size(readoutput(joinpath(testdir, "rl", "G_variance.tsv.gz"), 5)) == (51, 5)
 
         # Analysis without genotypes writes no marker-gene files
         grn(Y, 500:10:1000, outpath=joinpath(testdir, "nom"))
-        @test isfile(joinpath(testdir, "nom", "G_effects.tsv"))
-        @test !isfile(joinpath(testdir, "nom", "Q_effects.tsv"))
-        @test size(readoutput(joinpath(testdir, "nom", "G_effects.tsv"), 25)) == (51, 25)
+        @test isfile(joinpath(testdir, "nom", "G_effects.tsv.gz"))
+        @test !isfile(joinpath(testdir, "nom", "Q_effects.tsv.gz"))
+        @test size(readoutput(joinpath(testdir, "nom", "G_effects.tsv.gz"), 25)) == (51, 25)
 
         # The network is recovered with the spike-and-slab prior
         Random.seed!(3)
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "rec"),
             priors=(Gpi=0.2, Qpi=0.05))
-        Gflat = vec(mean(readoutput(joinpath(testdir, "rec", "G_effects.tsv"), 25), dims=1))
+        Gflat = vec(mean(readoutput(joinpath(testdir, "rec", "G_effects.tsv.gz"), 25), dims=1))
         Ghat = reshape(Gflat, 5, 5)' # Ghat[j, q] is the effect of gene q on gene j
         @test cor(vec(Ghat), vec(B')) > 0.7
+    end
+
+    @testset "Compressed output (default)" begin
+        testdir = mktempdir()
+        Random.seed!(5)
+        Y, M, = simulate()
+
+        # Run without specifying compress — default is compressed
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "default"))
+
+        # .tsv.gz files exist, plain .tsv files do not
+        @test isfile(joinpath(testdir, "default", "G_effects.tsv.gz"))
+        @test isfile(joinpath(testdir, "default", "G_pi.tsv.gz"))
+        @test isfile(joinpath(testdir, "default", "G_variance.tsv.gz"))
+        @test isfile(joinpath(testdir, "default", "Q_effects.tsv.gz"))
+        @test isfile(joinpath(testdir, "default", "base_average.tsv.gz"))
+        @test isfile(joinpath(testdir, "default", "base_residual_variance.tsv.gz"))
+        @test !isfile(joinpath(testdir, "default", "G_effects.tsv"))
+        @test !isfile(joinpath(testdir, "default", "Q_effects.tsv"))
+
+        # Indicator files are never written (PIP derived from effects)
+        @test !isfile(joinpath(testdir, "default", "G_indicator.tsv.gz"))
+        @test !isfile(joinpath(testdir, "default", "Q_indicator.tsv.gz"))
+
+        # Compressed files can be read back with correct dimensions
+        @test size(readoutput(joinpath(testdir, "default", "G_effects.tsv.gz"), 25)) == (51, 25)
+        @test size(readoutput(joinpath(testdir, "default", "G_pi.tsv.gz"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "default", "G_variance.tsv.gz"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "default", "Q_effects.tsv.gz"), 50)) == (51, 50)
+        @test size(readoutput(joinpath(testdir, "default", "base_average.tsv.gz"), 5)) == (51, 5)
+
+        # All values are finite
+        @test all(isfinite, readoutput(joinpath(testdir, "default", "G_effects.tsv.gz"), 25))
+        @test all(isfinite, readoutput(joinpath(testdir, "default", "G_variance.tsv.gz"), 5))
+
+        # posterior_mean works on .gz files
+        pm = GRN.posterior_mean(joinpath(testdir, "default", "G_effects.tsv.gz"))
+        @test length(pm) == 25
+        @test all(isfinite, pm)
+
+        # Compressed files are smaller than uncompressed
+        Random.seed!(5)
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "plain"), compress=false)
+        gz_size = filesize(joinpath(testdir, "default", "G_effects.tsv.gz"))
+        plain_size = filesize(joinpath(testdir, "plain", "G_effects.tsv"))
+        @test gz_size < plain_size
+    end
+
+    @testset "Plain output (compress=false)" begin
+        testdir = mktempdir()
+        Random.seed!(6)
+        Y, M, = simulate()
+
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "plain"), compress=false)
+
+        # Plain .tsv files exist, .tsv.gz files do not
+        @test isfile(joinpath(testdir, "plain", "G_effects.tsv"))
+        @test isfile(joinpath(testdir, "plain", "G_pi.tsv"))
+        @test isfile(joinpath(testdir, "plain", "Q_effects.tsv"))
+        @test isfile(joinpath(testdir, "plain", "base_average.tsv"))
+        @test !isfile(joinpath(testdir, "plain", "G_effects.tsv.gz"))
+        @test !isfile(joinpath(testdir, "plain", "Q_effects.tsv.gz"))
+
+        # Indicator files are never written
+        @test !isfile(joinpath(testdir, "plain", "G_indicator.tsv"))
+
+        # Plain files can be read back
+        @test size(readoutput(joinpath(testdir, "plain", "G_effects.tsv"), 25)) == (51, 25)
+        @test size(readoutput(joinpath(testdir, "plain", "G_pi.tsv"), 5)) == (51, 5)
+        @test all(isfinite, readoutput(joinpath(testdir, "plain", "G_effects.tsv"), 25))
+
+        # posterior_mean works on plain files
+        pm = GRN.posterior_mean(joinpath(testdir, "plain", "G_effects.tsv"))
+        @test length(pm) == 25
+        @test all(isfinite, pm)
+    end
+
+    @testset "PIP and derive_indicator" begin
+        testdir = mktempdir()
+        Random.seed!(8)
+        Y, M, = simulate()
+
+        # Run analysis (compressed by default, indicator files are never written)
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "run"))
+
+        effects_path = joinpath(testdir, "run", "G_effects.tsv.gz")
+
+        # --- posterior_inclusion_probability ---
+
+        pip = GRN.posterior_inclusion_probability(effects_path)
+        @test pip isa Vector{Float64}
+        @test length(pip) == 25  # 5 genes x 5 predictors
+        @test all(0.0 .<= pip .<= 1.0)
+
+        # Verify PIP by manual computation: proportion of non-zero rows per column
+        effects_mat = readoutput(effects_path, 25)  # 51 rows x 25 cols
+        manual_pip = vec(mean(effects_mat .!= 0.0, dims=1))
+        @test pip ≈ manual_pip
+
+        # Diagonal always zero (G prior excludes diagonal)
+        diag_idx = [1, 7, 13, 19, 25]
+        @test all(pip[diag_idx] .== 0.0)
+
+        # --- derive_indicator (PIP-based) ---
+
+        # Default threshold 0.5
+        ind = GRN.derive_indicator(effects_path)
+        @test ind isa BitVector
+        @test length(ind) == 25
+        @test all(ind .== (pip .> 0.5))
+
+        # threshold=0.0: included in at least one iteration
+        ind_any = GRN.derive_indicator(effects_path; threshold=0.0)
+        @test all(ind_any .== (pip .> 0.0))
+
+        # threshold=0.8: high-confidence inclusions
+        ind_strong = GRN.derive_indicator(effects_path; threshold=0.8)
+        @test all(ind_strong .== (pip .> 0.8))
+
+        # Diagonal always false
+        @test all(.!ind[diag_idx])
+
+        # Works on uncompressed files
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "plain"), compress=false)
+        pip_plain = GRN.posterior_inclusion_probability(joinpath(testdir, "plain", "G_effects.tsv"))
+        @test length(pip_plain) == 25
+        ind_plain = GRN.derive_indicator(joinpath(testdir, "plain", "G_effects.tsv"))
+        @test ind_plain isa BitVector
+        @test all(ind_plain .== (pip_plain .> 0.5))
+
+        # Marker-gene effects
+        q_pip = GRN.posterior_inclusion_probability(joinpath(testdir, "run", "Q_effects.tsv.gz"))
+        @test length(q_pip) == 50  # 5 genes x 10 markers
+        @test all(0.0 .<= q_pip .<= 1.0)
     end
 
     @testset "Allocations" begin

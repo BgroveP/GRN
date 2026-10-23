@@ -145,7 +145,6 @@ end
 
 _outputs(st::SpikeSlabState) = (
     effects=st.effects,
-    indicator=st.indicator,
     pi=st.pi,
     variance=st.var)
 

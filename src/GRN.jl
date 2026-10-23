@@ -3,6 +3,7 @@ module GRN
 # Used packages
 using Base.Threads
 using LinearAlgebra
+using Printf
 using Random
 using Statistics
 using DelimitedFiles
@@ -24,5 +25,6 @@ include("utility.jl")
 # Exports
 export grn
 export SpikeSlab, Ridge, Laplace
+export accuracy, posterior_mean, posterior_inclusion_probability, derive_indicator
 
 end

@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] - 2026-10-13
+## [version 0.0.1] - 2026-10-13
 
 Rewrite of the sampler core: the Gibbs hot path is now allocation-free, and
 the prior for gene-gene and marker-gene effects is selectable per relation
@@ -32,6 +32,18 @@ type instead of being fixed to spike-and-slab.
 - Benchmark scripts in `exclude/` (not part of the package): `bench.jl`
   (timing, allocations, and recovery on the data in `data/`) and
   `allocbench.jl` (per-function allocation counts)
+- `posterior_inclusion_probability(path)` — compute the exact posterior
+  inclusion probability (PIP) from an effects file by counting non-zero
+  values across MCMC iterations (`src/postanalysis.jl`)
+- `derive_indicator(path; threshold=0.5)` — derive a binary indicator
+  vector from an effects file by thresholding the PIP
+  (`src/postanalysis.jl`)
+- `close_outputs(outs)` — close all IO streams in an output vector
+  (`src/io.jl`)
+- `Printf` standard library dependency for `@printf` formatting
+- `AGENTS.md` — agent guidelines for the repository
+- Tests for compressed output (default), plain output (`compress=false`),
+  PIP derivation, and `derive_indicator` (`test/runtests.jl`)
 
 ### Changed
 
@@ -67,6 +79,20 @@ type instead of being fixed to spike-and-slab.
   Laplace prior)
 - Residual variance defaults: the prior residual variance scale is now
   initialized consistently as `Rvar * (Rvardf - 2)`
+- **Breaking:** `compress=true` is now the default in `grn()` and
+  `makeout()`. Output files are gzip-compressed (`.tsv.gz`, level 1) by
+  default. Set `compress=false` for plain `.tsv` files (`src/estimate.jl`,
+  `src/io.jl`)
+- File writes use an `IOBuffer` with `sizehint` pre-allocation and
+  `@printf("%.10g", ...)` for Float64 formatting, replacing per-element
+  `print` calls to the IO stream. `_write_row!` methods are specialized
+  for `Float64` and nested `Float64` vectors (`src/io.jl`)
+- `GZip.open` uses positional compression level argument (`"w", 1`)
+  matching GZip.jl v0.8 API (`src/io.jl`)
+- `accuracy`, `posterior_mean`, `posterior_inclusion_probability`, and
+  `derive_indicator` are now exported from the module
+- Test helper `readoutput` handles both `.tsv` and `.tsv.gz` files
+  (`test/runtests.jl`)
 
 ### Removed
 
@@ -75,6 +101,13 @@ type instead of being fixed to spike-and-slab.
 - Internal helpers that are no longer used: `_sample_pi!`,
   `_sample_effectvars!`, `dot!`, `indicator2indice`, and the temporary
   per-thread buffers (`GFloat*`, `QFloat*`, `IFloat*`) from the data bucket
+- **Breaking:** Indicator files (`G_indicator.tsv.gz`, `Q_indicator.tsv.gz`)
+  are no longer written. The posterior inclusion probability is derived
+  exactly from the effects files via `posterior_inclusion_probability()`
+  (`src/priors.jl`, `src/estimate.jl`)
+- Old `_write_row` methods (non-buffer, direct-to-stream) — replaced by
+  `_write_row!` (IOBuffer-based) in `src/io.jl`
+- Int8 fast path in `_write_row!` — dead code after indicator removal
 
 ### Performance
 
@@ -87,3 +120,8 @@ correlation with the true effects in `B.csv` and `F.csv`):
 | SpikeSlab  | 5.9 s | 0.770  | 0.468  |
 | Laplace    | 12.4 s | 0.805  | 0.518  |
 | Ridge      | 10.2 s | 0.739  | 0.444  |
+
+- Faster file writes: `@printf` Float64 formatting + `IOBuffer` batching
+  with `sizehint` pre-allocation replaces per-element `print` calls to the
+  IO stream (`src/io.jl`). For a 17K x 17K effects matrix (~289M values per
+  row), the row is buffered in memory and written in a single `write` call.
