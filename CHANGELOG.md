@@ -1,6 +1,18 @@
 # Changelog
 
-## [version 0.0.1] - 2026-10-13
+## [Unreleased]
+
+### Performance
+
+- `write_output` now uses a persistent 1 MB IOBuffer per output file that is
+  flushed to the stream whenever it fills, instead of accumulating the entire
+  row in memory and writing it in a single call. The buffer is created once
+  in `makeout` and reused across all writes. Memory usage is bounded to
+  ~1 MB per file regardless of row size — for 17K × 17K effects matrices
+  this reduces peak memory from several GB to ~8 MB total across all output
+  files (`src/io.jl`).
+
+## [0.1.0] - 2026-10-13
 
 Rewrite of the sampler core: the Gibbs hot path is now allocation-free, and
 the prior for gene-gene and marker-gene effects is selectable per relation

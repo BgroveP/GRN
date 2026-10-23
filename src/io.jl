@@ -6,8 +6,9 @@
 Create an output folder and open one tab-separated output file per entry in
 `outputs`, a NamedTuple that maps a file name to the object that will be
 written to it. Returns a vector of NamedTuples with the name, the output
-object, and the IO stream. Files are gzip-compressed (level 1) by default,
-producing `.tsv.gz` files; set `compress=false` for plain `.tsv` files.
+object, the IO stream, and a persistent IOBuffer. Files are gzip-compressed
+(level 1) by default, producing `.tsv.gz` files; set `compress=false` for
+plain `.tsv` files.
 """
 function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false, compress::Bool=true)::Vector{NamedTuple}
     # Handle existing directory
@@ -20,42 +21,46 @@ function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false, comp
     # Make new directory
     mkpath(p)
 
-    # Create one IO stream per output object
+    # Create one IO stream and one persistent buffer per output object
     return [(name=k, values=outputs[k],
              io=compress ? GZip.open(joinpath(abspath(p), "$k.tsv.gz"), "w", 1)
-                          : open(joinpath(abspath(p), "$k.tsv"), "w"))
+                          : open(joinpath(abspath(p), "$k.tsv"), "w"),
+             buf=IOBuffer(sizehint=_BUFSIZE))
             for k in keys(outputs)]
 end
 
 """
-    write_output(o; sep='\\t')
+    write_output(o; sep='\t')
 
 Write one row of the output object in `o` to its IO stream. Vectors are
 written as one row of tab-separated values, and vectors of vectors are
-written as one flattened row. Uses an IOBuffer with a size hint to avoid
-reallocations, and `@printf` for fast Float64 formatting. The entire row
-is buffered in memory and written in a single `write` call — for very
-large rows (e.g. 17K x 17K effects) this can require several GB of RAM.
+written as one flattened row. Uses a persistent IOBuffer (1 MB, created in
+`makeout`) that is flushed to the stream whenever it fills, so memory usage
+stays bounded even for very large rows (e.g. 17K × 17K effects). `@printf`
+is used for fast Float64 formatting.
 """
 function write_output(o::NamedTuple; sep::Char='\t')::Nothing
-    buf = IOBuffer(sizehint=_bufsize_hint(o.values))
-    _write_row!(buf, o.values, sep)
-    write(o.io, take!(buf))
+    buf = o.buf
+    _write_row!(buf, o.io, o.values, sep)
+    write(o.io, take!(buf))  # flush any remaining data
     return nothing
 end
 
-# Estimate buffer size to avoid reallocations during growth.
-# ~20 bytes per Float64 (%.10g output + separator).
-_bufsize_hint(x::AbstractVector{<:Real}) = min(length(x) * 20, 1 << 28)
-_bufsize_hint(x::AbstractVector{<:AbstractVector{Float64}}) = min(sum(length, x) * 20, 1 << 28)
-_bufsize_hint(x::AbstractVector{<:AbstractVector}) = min(sum(length, x) * 20, 1 << 28)
+# Flush the buffer to the stream if it has reached the size threshold.
+@inline function _flush_if_full!(buf::IOBuffer, io::IO)::Nothing
+    if position(buf) >= _BUFSIZE
+        write(io, take!(buf))
+    end
+    return nothing
+end
 
 # --- Fast path: 1D Float64 vector ---
 
-function _write_row!(buf::IOBuffer, x::AbstractVector{Float64}, sep::Char)::Nothing
+function _write_row!(buf::IOBuffer, io::IO, x::AbstractVector{Float64}, sep::Char)::Nothing
     @inbounds for i in eachindex(x)
         i != firstindex(x) && print(buf, sep)
         @printf(buf, "%.10g", x[i])
+        _flush_if_full!(buf, io)
     end
     println(buf)
     return nothing
@@ -63,7 +68,7 @@ end
 
 # --- Fast path: nested Float64 vectors (flattened into one row) ---
 
-function _write_row!(buf::IOBuffer, x::AbstractVector{<:AbstractVector{Float64}}, sep::Char)::Nothing
+function _write_row!(buf::IOBuffer, io::IO, x::AbstractVector{<:AbstractVector{Float64}}, sep::Char)::Nothing
     first = true
     for v in x
         @inbounds for val in v
@@ -75,6 +80,7 @@ function _write_row!(buf::IOBuffer, x::AbstractVector{<:AbstractVector{Float64}}
                 @printf(buf, "%.10g", val)
             end
         end
+        _flush_if_full!(buf, io)
     end
     println(buf)
     return nothing
@@ -82,14 +88,28 @@ end
 
 # --- Generic fallbacks for non-Float64 element types ---
 
-function _write_row!(buf::IOBuffer, x::AbstractVector{<:Real}, sep::Char)::Nothing
-    write(buf, join(string.(x), sep))
+function _write_row!(buf::IOBuffer, io::IO, x::AbstractVector{<:Real}, sep::Char)::Nothing
+    first = true
+    for val in x
+        first || print(buf, sep)
+        print(buf, val)
+        first = false
+        _flush_if_full!(buf, io)
+    end
     println(buf)
     return nothing
 end
 
-function _write_row!(buf::IOBuffer, x::AbstractVector{<:AbstractVector}, sep::Char)::Nothing
-    write(buf, join(string.(Iterators.flatten(x)), sep))
+function _write_row!(buf::IOBuffer, io::IO, x::AbstractVector{<:AbstractVector}, sep::Char)::Nothing
+    first = true
+    for v in x
+        for val in v
+            first || print(buf, sep)
+            print(buf, val)
+            first = false
+            _flush_if_full!(buf, io)
+        end
+    end
     println(buf)
     return nothing
 end

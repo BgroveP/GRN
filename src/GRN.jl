@@ -12,6 +12,10 @@ using GZip
 # Set number of BLAS threads to one
 BLAS.set_num_threads(1)
 
+# Fixed buffer size for streaming output writes (1 MB).
+# Bounds memory per output file regardless of row size.
+const _BUFSIZE = 1 << 20
+
 # Includes
 include("postanalysis.jl")
 include("priors.jl")
