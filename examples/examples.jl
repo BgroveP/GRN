@@ -2,6 +2,7 @@
 # Load packages
 using DelimitedFiles
 using GRN
+using GZip
 
 # Load the input
 pkgroot = dirname(dirname(pathof(GRN)))

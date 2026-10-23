@@ -69,7 +69,8 @@ function grn(Y::Matrix{Float64},
     chain::AbstractRange{Int}=100:10:200;
     priors::NamedTuple=(;),
     outpath::AbstractString="grn",
-    overwrite::Bool=false)
+    overwrite::Bool=false,
+    compress::Bool=false)
 
     # Check input
     _checkinput(Y, M, chain)
@@ -104,7 +105,7 @@ function grn(Y::Matrix{Float64},
 
     # Create folder and IO streams
     ## This function creates a named collection of IOStreams for later use
-    ofiles = makeout(outpath, _outputs(data, amounts.loci); force=overwrite)
+    ofiles = makeout(outpath, _outputs(data, amounts.loci); force=overwrite, compress=compress)
 
     try
         # Start analysis

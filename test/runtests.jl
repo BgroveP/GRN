@@ -3,6 +3,7 @@ using Random
 using LinearAlgebra
 using Statistics
 using Test
+using GZip
 
 # Helper: read an output file as a matrix with a given number of values per line
 function readoutput(p, ncols)

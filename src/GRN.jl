@@ -6,6 +6,7 @@ using LinearAlgebra
 using Random
 using Statistics
 using DelimitedFiles
+using GZip
 
 # Set number of BLAS threads to one
 BLAS.set_num_threads(1)
