@@ -1,6 +1,6 @@
 # GRN
 
-[![Build Status](https://github.com/BgroveP/GRN.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/BgroveP/GRN.jl/actions/workflows/CI.yml?query=branch%3Amaster)
+[![Build Status](https://github.com/BgroveP/GRN/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/BgroveP/GRN/actions/workflows/CI.yml?query=branch%3Amain)
 
 ## Overview
 
@@ -25,7 +25,7 @@ Install the package from this repository, for example from a Julia session:
 
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/BgroveP/GRN.jl")
+Pkg.add(url = "https://github.com/BgroveP/GRN")
 ```
 
 or, for development, clone the repository and activate the package in the project folder with `Pkg.develop(path = "...")`.

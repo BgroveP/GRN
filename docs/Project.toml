@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e301f0a5-df0e-4388-a0be-6d13ad32a3b2"
+GRN = "95d5f77b-65ec-463d-8165-8b48baabed35"
+
+[compat]
+Documenter = "1"

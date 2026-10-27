@@ -1,6 +1,6 @@
 name = "GRN"
 uuid = "95d5f77b-65ec-463d-8165-8b48baabed35"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Bjarke Poulsen", "Emre Karaman"]
 
 [deps]

@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: GRN
+authors:
+  - family-names: Poulsen
+    given-names: Bjarke
+  - family-names: Karaman
+    given-names: Emre
+repository-code: "https://github.com/BgroveP/GRN"
+abstract: "Julia package for Bayesian gene regulatory network inference from gene expression and genotype data via Gibbs sampling with selectable priors."
+license: MIT
