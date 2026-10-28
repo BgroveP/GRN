@@ -96,8 +96,8 @@ function _sample_iteration!(d::NamedTuple, ssqs::NamedTuple,
     @threads for s in eachindex(chunks)
         @inbounds for c in chunks[s]
 
-            # Base
-            _sample_mean!(d, c, individuals)
+            # Base: fixed effects (intercept is the coefficient of the ones column)
+            _sample_fixedeffects!(d, c)
             _sample_residualvariance!(d, c)
 
             # Gene-gene effects
@@ -115,21 +115,37 @@ function _sample_iteration!(d::NamedTuple, ssqs::NamedTuple,
     return nothing
 end
 
-# ---------------------------------------------------------------- Mean
+# ---------------------------------------------------------------- Fixed effects
 
 """
 
-    _sample_mean!(d, c, n)
+    _sample_fixedeffects!(d, c)
 
-Update the average gene expression (`mu`) of gene `c` and adjust the
-residual accordingly. Conditional posterior: mu | Rvar, R is normal with
-mean `mean(R)` and variance `Rvar / n`.
+Update the fixed effect coefficients for gene `c`. With a flat prior,
+each coefficient is sampled coordinate-wise from its conditional
+posterior: Beta_k | rest ~ Normal(X_k'R / X_k'X_k, Rvar / X_k'X_k).
+The residual is adjusted in place. When `X` is a column of ones
+(the default), the single coefficient is the per-gene intercept.
+Allocation-free.
 
 """
-function _sample_mean!(d::NamedTuple, c::Int, n::Int)::Nothing
-    deviation = mean(d.in.R[c]) + sqrt(d.out.base.residual_variance[c] / n) * randn()
-    d.out.base.average[c] += deviation
-    d.in.R[c] .-= deviation
+function _sample_fixedeffects!(d::NamedTuple, c::Int)::Nothing
+    X::Vector{Vector{Float64}} = d.in.X
+    beta::Vector{Float64} = d.out.base.fixedeffects[c]
+    r::Vector{Float64} = d.in.R[c]
+    rvar::Float64 = d.out.base.residual_variance[c]
+    ssqX::Vector{Float64} = d.tmpshared.ssqX
+
+    @inbounds for k in eachindex(X)
+        x::Vector{Float64} = X[k]
+        bk::Float64 = beta[k]
+        prec::Float64 = ssqX[k]
+        r .+= bk .* x
+        bk = dot(x, r) / prec + sqrt(rvar / prec) * randn()
+        beta[k] = bk
+        r .-= bk .* x
+    end
+
     return nothing
 end
 
@@ -162,6 +178,11 @@ end
 
 # Spike-and-slab: sample the indicator from the mixture posterior, then the
 # effect from the slab if included.
+#
+# The log-odds logD0 - logD1 simplifies algebraically: log(ssqX[q]) appears
+# in both log(v0) and log(v1) and cancels, leaving one log call per effect
+# instead of four.  log(1-pic), log(pic), and rvar/varc are hoisted out of
+# the loop as per-gene constants.
 function _sample_effects_gene!(st::SpikeSlabState, c::Int,
     X::Vector{Vector{Float64}}, ssqX::Vector{Float64},
     R::Vector{Vector{Float64}}, Rvar::Vector{Float64})::Nothing
@@ -175,19 +196,27 @@ function _sample_effects_gene!(st::SpikeSlabState, c::Int,
     pic::Float64 = st.pi[c]
     candidates::Vector{Int} = st.candidates[c]
 
+    # Per-gene constants hoisted out of the per-effect loop
+    log_odds_prior::Float64 = log(1.0 - pic) - log(pic)  # log((1-pic)/pic)
+    rvar_over_varc::Float64 = rvar / varc
+
     # Work per effect
     @inbounds for q in candidates
         x::Vector{Float64} = X[q]
         wq::Float64 = w[q]
         wq != 0.0 && (r .+= wq .* x)
         dotprod::Float64 = dot(x, r)
-        v0::Float64 = ssqX[q] * rvar
-        v1::Float64 = ssqX[q] * (ssqX[q] * varc + rvar)
-        logD0::Float64 = -0.5 * (log(v0) + dotprod * dotprod / v0) + log(1.0 - pic)
-        logD1::Float64 = -0.5 * (log(v1) + dotprod * dotprod / v1) + log(pic)
-        wi[q] = rand() < 1.0 / (1.0 + exp(logD0 - logD1))
+        dp2::Float64 = dotprod * dotprod
+        ssqx::Float64 = ssqX[q]
+        v0::Float64 = ssqx * rvar
+        v1::Float64 = ssqx * (ssqx * varc + rvar)
+        # logD0 - logD1 = -0.5 * (log(v0/v1) + dp2*(1/v0 - 1/v1)) + log((1-pic)/pic)
+        # v0/v1 = rvar / (ssqx*varc + rvar)
+        log_diff::Float64 = -0.5 * (log(rvar / (ssqx * varc + rvar)) +
+            dp2 * (1.0 / v0 - 1.0 / v1)) + log_odds_prior
+        wi[q] = rand() < 1.0 / (1.0 + exp(log_diff))
         if wi[q] == 1
-            prec::Float64 = ssqX[q] + rvar / varc
+            prec::Float64 = ssqx + rvar_over_varc
             wq = dotprod / prec + sqrt(rvar / prec) * randn()
             w[q] = wq
             r .-= wq .* x

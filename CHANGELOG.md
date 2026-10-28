@@ -2,8 +2,60 @@
 
 ## [Unreleased]
 
+### Added
+
+- Binary output format (`format=:bin`) — `grn()` and `makeout()` now accept
+  `format=:tsv` (default) or `format=:bin`. Binary files store raw Float64
+  bytes with a 16-byte header (magic `"GRNB"`, version, ncols), no text
+  formatting overhead. File extensions: `.bin` (uncompressed) or `.bin.gz`
+  (gzip-compressed, level 1). Binary writes use `unsafe_write` with pointer
+  arithmetic — allocation-free streaming in 1 MB chunks
+  (`src/io.jl`, `src/estimate.jl`)
+- `read_binary(path)` — read a GRN binary output file (`.bin` or `.bin.gz`)
+  into a matrix with one row per MCMC iteration. Validates the header magic
+  and version; throws on corrupt files (`src/postanalysis.jl`)
+- `posterior_mean`, `posterior_inclusion_probability`, `derive_indicator`,
+  and `accuracy` auto-detect binary files by extension and use streaming
+  binary readers — no full file load into memory (`src/postanalysis.jl`)
+- `simulate(; n, m, u, seed, density, effect_sd, noise_sd, G, Q, mu, M)` —
+  simulate gene expression data and genotypes from a linear gene regulatory
+  network model `Y = mu + Y*G + M*Q + epsilon`. `G` is a random strictly
+  upper-triangular DAG (or user-provided), `Q` is a sparse marker-gene
+  effects matrix, and `epsilon` is Gaussian noise. Returns a NamedTuple
+  `(Y, M, G, Q, mu)` with the simulated data and true parameters, ready to
+  pass to `grn()` (`src/simulate.jl`)
+- Fixed effects correction in `grn()` via the `X` keyword — an *n* × *p*
+  design matrix (same for all genes) whose coefficients `Beta` (p × m) are
+  estimated in the MCMC chain with flat priors. Defaults to `ones(n, 1)`
+  (intercept only), so the per-gene mean is now captured as the coefficient
+  of the ones column. The separate `mu`/`_sample_mean!` path is removed;
+  output is always `base_fixedeffects.tsv.gz` (replaces `base_average.tsv.gz`).
+  Coordinate-wise Gibbs, allocation-free
+  (`src/estimate.jl`, `src/initialize.jl`, `src/sample.jl`)
+- **Breaking:** `base_average.tsv.gz` is no longer written — the intercept is
+  now part of `base_fixedeffects.tsv.gz`. The `mu` key in the `priors`
+  NamedTuple is no longer recognized (`src/estimate.jl`, `src/initialize.jl`)
+- `simulate()` gains `X` and `Beta` keywords to generate data with known
+  fixed effects; returns `(Y, M, G, Q, mu, X, Beta)` (`src/simulate.jl`)
+
+### Changed
+
+- **Breaking:** `X` can no longer be `nothing` in `grn()` and
+  `create_databucket()`. The default is now `ones(n, 1)` (intercept only)
+  directly in the type signature (`X::Matrix{Float64}=ones(n, 1)`), removing
+  the `Union{Matrix{Float64}, Nothing}` sentinel. The convenience method
+  `grn(Y, chain; ...)` and `create_databucket()` no longer accept
+  `X=nothing` (`src/estimate.jl`, `src/initialize.jl`)
+- `grn(Y, chain; ...)` convenience method: `X=nothing` now defaults to
+  `ones(n, 1)` (intercept only) instead of passing `nothing` to the main
+  method, which expected `Matrix{Float64}` (`src/estimate.jl`)
+
 ### Performance
 
+- Binary output (`format=:bin`) eliminates `%.10g` text formatting and
+  tab-separator overhead from the write hot path. Writes use `unsafe_write`
+  with pointer arithmetic, chunked through the 1 MB IOBuffer — no per-element
+  allocation (`src/io.jl`)
 - `write_output` now uses a persistent 1 MB IOBuffer per output file that is
   flushed to the stream whenever it fills, instead of accumulating the entire
   row in memory and writing it in a single call. The buffer is created once
@@ -11,6 +63,31 @@
   ~1 MB per file regardless of row size — for 17K × 17K effects matrices
   this reduces peak memory from several GB to ~8 MB total across all output
   files (`src/io.jl`).
+- Spike-and-slab effect sampler: per-gene constants `log(1-pi)`, `log(pi)`,
+  and `rvar/var` are hoisted out of the per-effect loop, and the log-odds
+  `logD0 - logD1` is computed directly (the `log(ssqX[q])` term cancels
+  algebraically). This reduces 4 `log` calls + 1 division per effect to
+  1 `log` call per effect — for 17K × 17K effects that saves ~1.7 billion
+  `log` calls per MCMC iteration (`src/sample.jl`).
+- `write_output` no longer flushes the IOBuffer to the stream after every
+  row. Data accumulates across rows and is only written when the 1 MB
+  buffer fills, batching GZip compression and reducing system call
+  overhead. New `flush_outputs()` flushes pending buffer data;
+  `close_outputs()` now calls `flush_outputs()` before closing streams.
+  `grn()` uses `close_outputs()` in its `finally` block
+  (`src/io.jl`, `src/estimate.jl`).
+- Benchmark on `data/` (1305 individuals, 10 genes, 200 markers, 50K
+  iterations, 981 output rows, 1 thread):
+
+  | Configuration              | Before  | After   | Change  |
+  |----------------------------|---------|---------|---------|
+  | SpikeSlab (no hyperpriors) | 28.9 s  | 27.5 s  | -5%     |
+  | SpikeSlab (with hyperpriors)| 30.2 s | 28.1 s  | -7%     |
+  | Ridge + Laplace            | 58.0 s  | 55.9 s  | -4%     |
+  | Plain output               | 29.8 s  | 26.5 s  | -11%    |
+
+  Savings scale with problem size; the log-hoisting benefit grows
+  quadratically with the number of genes (m² effects per iteration).
 
 ## [0.1.0] - 2026-10-13
 

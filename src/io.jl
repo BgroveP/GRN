@@ -1,16 +1,38 @@
 # Functions for creating output files and writing parameters to them
 
-"""
-    makeout(p, outputs; force=false, compress=true)
+# Binary format magic bytes ("GRNB") and version
+const _BIN_MAGIC = UInt32(0x42524E47)  # "GRNB" in little-endian
+const _BIN_VERSION = UInt32(1)
+const _BIN_HEADER_SIZE = 16  # magic(4) + version(4) + ncols(8)
 
-Create an output folder and open one tab-separated output file per entry in
+"""
+    makeout(p, outputs; force=false, compress=true, format=:tsv)
+
+Create an output folder and open one output file per entry in
 `outputs`, a NamedTuple that maps a file name to the object that will be
 written to it. Returns a vector of NamedTuples with the name, the output
-object, the IO stream, and a persistent IOBuffer. Files are gzip-compressed
-(level 1) by default, producing `.tsv.gz` files; set `compress=false` for
-plain `.tsv` files.
+object, the IO stream, a persistent IOBuffer, and the format.
+
+# Arguments
+ - `p`:        Output directory path
+ - `outputs`:  NamedTuple mapping file names to output objects
+ - `force`:    Overwrite existing directory
+ - `compress`: Gzip-compress the output (level 1, fast)
+ - `format`:   `:tsv` for tab-separated text (default) or `:bin` for
+               raw binary Float64 with a 16-byte header
+
+# File extensions
+ - `format=:tsv, compress=true`  → `.tsv.gz`
+ - `format=:tsv, compress=false` → `.tsv`
+ - `format=:bin, compress=true`  → `.bin.gz`
+ - `format=:bin, compress=false` → `.bin`
 """
-function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false, compress::Bool=true)::Vector{NamedTuple}
+function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false,
+    compress::Bool=true, format::Symbol=:tsv)::Vector{NamedTuple}
+
+    format in (:tsv, :bin) || throw(ArgumentError(
+        "format must be :tsv or :bin, got :$format"))
+
     # Handle existing directory
     if isdir(p)
         force || error("The output directory $p already exists")
@@ -21,28 +43,62 @@ function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false, comp
     # Make new directory
     mkpath(p)
 
+    # Determine file extension
+    ext = if format === :bin
+        compress ? ".bin.gz" : ".bin"
+    else
+        compress ? ".tsv.gz" : ".tsv"
+    end
+
     # Create one IO stream and one persistent buffer per output object
-    return [(name=k, values=outputs[k],
-             io=compress ? GZip.open(joinpath(abspath(p), "$k.tsv.gz"), "w", 1)
-                          : open(joinpath(abspath(p), "$k.tsv"), "w"),
-             buf=IOBuffer(sizehint=_BUFSIZE))
-            for k in keys(outputs)]
+    files = NamedTuple[]
+    for k in keys(outputs)
+        io = compress ? GZip.open(joinpath(abspath(p), "$k$ext"), "w", 1) : open(joinpath(abspath(p), "$k$ext"), "w")
+        buf = IOBuffer(sizehint=_BUFSIZE)
+
+        # Write binary header (magic + version + ncols)
+        if format === :bin
+            ncols = _ncols(outputs[k])
+            write(buf, _BIN_MAGIC)
+            write(buf, _BIN_VERSION)
+            write(buf, Int64(ncols))
+        end
+
+        push!(files, (name=k, values=outputs[k], io=io, buf=buf, format=format))
+    end
+    return files
 end
+
+"""
+    _ncols(x)
+
+Return the number of Float64 values in one row of output object `x`.
+"""
+_ncols(x::AbstractVector{Float64})::Int = length(x)
+_ncols(x::AbstractVector{<:AbstractVector{Float64}})::Int = sum(length, x)
+_ncols(x::AbstractVector{<:Real})::Int = length(x)
+_ncols(x::AbstractVector{<:AbstractVector})::Int = sum(length, x)
 
 """
     write_output(o; sep='\t')
 
-Write one row of the output object in `o` to its IO stream. Vectors are
-written as one row of tab-separated values, and vectors of vectors are
-written as one flattened row. Uses a persistent IOBuffer (1 MB, created in
+Write one row of the output object in `o` to its IOBuffer. For `format=:tsv`,
+vectors are written as one row of tab-separated values, and vectors of vectors
+are written as one flattened row. For `format=:bin`, raw Float64 bytes are
+written with no separators. Uses a persistent IOBuffer (1 MB, created in
 `makeout`) that is flushed to the stream whenever it fills, so memory usage
-stays bounded even for very large rows (e.g. 17K × 17K effects). `@printf`
-is used for fast Float64 formatting.
+stays bounded even for very large rows (e.g. 17K × 17K effects).
+
+The buffer is NOT flushed after every row — data accumulates across rows
+and is only written to the stream when the buffer fills. Call `flush_outputs`
+before closing the streams to write any remaining buffered data.
 """
 function write_output(o::NamedTuple; sep::Char='\t')::Nothing
-    buf = o.buf
-    _write_row!(buf, o.io, o.values, sep)
-    write(o.io, take!(buf))  # flush any remaining data
+    if get(o, :format, :tsv) === :bin
+        _write_row_bin!(o.buf, o.io, o.values)
+    else
+        _write_row!(o.buf, o.io, o.values, sep)
+    end
     return nothing
 end
 
@@ -114,21 +170,84 @@ function _write_row!(buf::IOBuffer, io::IO, x::AbstractVector{<:AbstractVector},
     return nothing
 end
 
+# --- Binary output: raw Float64 bytes, no separators ---
+#
+# Binary writes use unsafe_write with pointer arithmetic for zero-copy,
+# allocation-free streaming. Data is written in chunks of _BUFSIZE bytes
+# so the IOBuffer never grows beyond ~1 MB regardless of row size.
+
+"""
+    _write_row_bin!(buf, io, x)
+
+Write one row of Float64 values to `buf` in raw binary format (native
+endianness, no separators). Flushes to `io` when the buffer fills.
+"""
+function _write_row_bin!(buf::IOBuffer, io::IO, x::AbstractVector{Float64})::Nothing
+    n = length(x)
+    n == 0 && return nothing
+    ptr = Ptr{UInt8}(pointer(x))
+    total_bytes = n * sizeof(Float64)
+    offset = 0
+    while offset < total_bytes
+        chunk = min(_BUFSIZE, total_bytes - offset)
+        unsafe_write(buf, ptr + offset, chunk)
+        offset += chunk
+        _flush_if_full!(buf, io)
+    end
+    return nothing
+end
+
+function _write_row_bin!(buf::IOBuffer, io::IO, x::AbstractVector{<:AbstractVector{Float64}})::Nothing
+    for v in x
+        _write_row_bin!(buf, io, v)
+    end
+    return nothing
+end
+
+# Generic fallbacks for non-Float64 element types (convert to Float64)
+function _write_row_bin!(buf::IOBuffer, io::IO, x::AbstractVector{<:Real})::Nothing
+    _write_row_bin!(buf, io, Float64.(x))
+    return nothing
+end
+
+function _write_row_bin!(buf::IOBuffer, io::IO, x::AbstractVector{<:AbstractVector})::Nothing
+    for v in x
+        _write_row_bin!(buf, io, Float64.(v))
+    end
+    return nothing
+end
+
 function _print(i::NamedTuple)::Nothing
-    println("Number of individuals:  $(i.individuals)")
-    println("Number of genes:        $(i.genes)")
-    println("Number of markers:      $(i.loci)")
-    println("Number of threads:      $(nthreads())")
+    println("Number of individuals:   $(i.individuals)")
+    println("Number of genes:         $(i.genes)")
+    println("Number of markers:       $(i.loci)")
+    println("Number of fixed effects: $(get(i, :fixed, 1))")
+    println("Number of threads:       $(nthreads())")
+    return nothing
+end
+
+"""
+    flush_outputs(outs)
+
+Flush all pending IOBuffer data to the underlying streams. Must be called
+before `close_outputs` (or before closing streams manually) to ensure no
+buffered data is lost.
+"""
+function flush_outputs(outs::Vector{NamedTuple})::Nothing
+    for o in outs
+        write(o.io, take!(o.buf))
+    end
     return nothing
 end
 
 """
     close_outputs(outs)
 
-Close all IO streams in the vector of output NamedTuples. Must be called
-to flush gzip trailers and release file handles.
+Flush all IOBuffer data and close all IO streams in the vector of output
+NamedTuples. Must be called to flush gzip trailers and release file handles.
 """
 function close_outputs(outs::Vector{NamedTuple})::Nothing
+    flush_outputs(outs)
     for o in outs
         close(o.io)
     end

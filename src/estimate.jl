@@ -1,6 +1,6 @@
 """
 
-    grn(Y, M, chain; priors=(;), outpath="grn", overwrite=false)
+    grn(Y, M, chain; X=ones(size(Y,1), 1), priors=(;), outpath="grn", overwrite=false)
 
 Estimate the gene regulatory network using a matrix with gene expression and
 a matrix with genotypes.
@@ -21,10 +21,20 @@ a matrix with genotypes.
                     For example, giving `10000:50:20000` as input will regard iterations
                        1:9999 as burn-in, and write parameters for iterations 10000,
                        10050, 10100, ..., 20000
+ - `X`:             An *n* × *p* matrix with fixed effect covariates, the same
+                    for all genes. Defaults to `ones(n, 1)` (intercept only).
+                    The coefficients `Beta` (p × m) are estimated in the MCMC
+                    chain with flat priors. The per-gene intercept is the
+                    coefficient of the ones column.                                                     (Matrix{Float64})
  - `priors`:        The priors given for the analysis                                                                   (NamedTuple)
  - `outpath`:       The relative path to the folder for output files                                                    (String)
  - `overwrite`:     Denotes whether an existing outpath should be overwritten                                           (Bool)
- - `compress`:      Write gzip-compressed `.tsv.gz` files (default, level 1, fast). Set to `false` for plain `.tsv`.  (Bool)
+ - `compress`:      Gzip-compress the output files (default, level 1, fast). Set to
+                    `false` for uncompressed files.                                                        (Bool)
+ - `format`:        Output format: `:tsv` for tab-separated text (default) or `:bin` for
+                    raw binary Float64 with a 16-byte header. Binary format is much
+                    faster to write and read — recommended for large analyses.
+                    File extensions: `.tsv`, `.tsv.gz`, `.bin`, `.bin.gz`.                                    (Symbol)
 
 # Priors
  The prior for gene-gene (G) and marker-gene (Q) effects is selected with
@@ -42,8 +52,7 @@ a matrix with genotypes.
  before the analysis. The key for a base field is the field name, and the
  key for a prior state field is the group letter followed by the field name.
 
- Priors related to the mean and residual
- - `mu`:            An *m* dimensional vector of average gene expressions                                               (Float64)
+ Priors related to the residual
  - `Rvar`:          An *m* dimensional vector of residual variances                                                     (Float64)
  - `Rvardf`:        An *m* dimensional vector of degrees of freedoms for the prior residual variance                    (Float64)
  - `Rvarscale`:     An *m* dimensional vector of prior degrees of freedom times prior residual variances                 (Float64)
@@ -67,16 +76,19 @@ a matrix with genotypes.
 function grn(Y::Matrix{Float64},
     M::Matrix{Float64}=zeros(0, 0),
     chain::AbstractRange{Int}=100:10:200;
+    X::Matrix{Float64}=ones(size(Y, 1), 1),
     priors::NamedTuple=(;),
     outpath::AbstractString="grn",
     overwrite::Bool=false,
-    compress::Bool=true)
+    compress::Bool=true,
+    format::Symbol=:tsv)
 
     # Check input
-    _checkinput(Y, M, chain)
+    _checkinput(Y, M, chain, X)
 
-    # Get amounts of individuals, genes, and marker loci for later use
-    amounts = (individuals=size(Y, 1), genes=size(Y, 2), loci=size(M, 2))
+    # Get amounts of individuals, genes, marker loci, and fixed effects
+    amounts = (individuals=size(Y, 1), genes=size(Y, 2), loci=size(M, 2),
+        fixed=size(X, 2))
 
     # Print
     _print(amounts)
@@ -91,7 +103,7 @@ function grn(Y::Matrix{Float64},
 
     # Initialize parameters
     ## This creates a large named tuple with input, output, and temporary arrays
-    data = create_databucket(Y, M, amounts, Gsel, Qsel)
+    data = create_databucket(Y, M, amounts, Gsel, Qsel, X)
 
     # Insert priors
     ## This function inserts priors into the output part of the data bucket
@@ -105,7 +117,7 @@ function grn(Y::Matrix{Float64},
 
     # Create folder and IO streams
     ## This function creates a named collection of IOStreams for later use
-    ofiles = makeout(outpath, _outputs(data, amounts.loci); force=overwrite, compress=compress)
+    ofiles = makeout(outpath, _outputs(data, amounts.loci); force=overwrite, compress=compress, format=format)
 
     try
         # Start analysis
@@ -124,10 +136,8 @@ function grn(Y::Matrix{Float64},
             end
         end
     finally
-        # Close the output files
-        for o in ofiles
-            close(o.io)
-        end
+        # Flush buffers and close the output files
+        close_outputs(ofiles)
     end
 
     # Return
@@ -136,12 +146,14 @@ end
 
 # Convenience method for analyses without genotypes
 function grn(Y::Matrix{Float64}, chain::AbstractRange{Int};
+    X::Matrix{Float64}=ones(size(Y, 1), 1),
     priors::NamedTuple=(;),
     outpath::AbstractString="grn",
     overwrite::Bool=false,
-    compress::Bool=true)
-    return grn(Y, zeros(0, 0), chain; priors=priors, outpath=outpath, overwrite=overwrite,
-        compress=compress)
+    compress::Bool=true,
+    format::Symbol=:tsv)
+    return grn(Y, zeros(0, 0), chain; X=X, priors=priors, outpath=outpath,
+        overwrite=overwrite, compress=compress, format=format)
 end
 
 """
@@ -150,16 +162,18 @@ end
 
 Collect the output objects of the data bucket into a flat NamedTuple with
 one entry per output file. The keys become the file names. The marker-gene
-group is skipped when there are no marker loci. Indicator matrices are not
-included — the posterior inclusion probability can be derived exactly from
-the effects files with `GRN.posterior_inclusion_probability`.
+group is skipped when there are no marker loci. The fixed effects
+(`base_fixedeffects`) include the intercept when `X` is a column of ones.
+Indicator matrices are not included — the posterior inclusion probability
+can be derived exactly from the effects files with
+`GRN.posterior_inclusion_probability`.
 
 """
 function _outputs(d::NamedTuple, loci::Int)::NamedTuple
 
     # Base outputs
     o = (
-        base_average=d.out.base.average,
+        base_fixedeffects=d.out.base.fixedeffects,
         base_residual_variance=d.out.base.residual_variance
     )
 

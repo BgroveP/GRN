@@ -24,11 +24,13 @@ include("check.jl")
 include("estimate.jl")
 include("io.jl")
 include("sample.jl")
+include("simulate.jl")
 include("utility.jl")
 
 # Exports
-export grn
+export grn, simulate
 export SpikeSlab, Ridge, Laplace
 export accuracy, posterior_mean, posterior_inclusion_probability, derive_indicator
+export read_binary
 
 end

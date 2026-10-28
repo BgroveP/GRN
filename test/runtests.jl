@@ -4,6 +4,7 @@ using LinearAlgebra
 using Statistics
 using Test
 using GZip
+using DelimitedFiles
 
 # Helper: read an output file as a matrix with a given number of values per line.
 # Handles both plain .tsv and gzip-compressed .tsv.gz files.
@@ -16,25 +17,6 @@ function readoutput(p, ncols)
     finally
         close(io)
     end
-end
-
-# Simulate data with a known network. B[i, j] is the effect of gene i on
-# gene j, F[l, j] is the effect of marker l on gene j.
-function simulate(n=200, m=5, u=10; seed=1)
-    rng = MersenneTwister(seed)
-    M = randn(rng, n, u)
-    B = zeros(m, m)
-    F = zeros(u, m)
-    for j in 2:m
-        B[j-1, j] = iseven(j) ? 0.8 : -0.8
-        j - 1 <= u && (F[j-1, j] = iseven(j) ? 1.0 : -1.0)
-    end
-    mu = collect(1.0:m)
-    Y = zeros(n, m)
-    for j in 1:m
-        Y[:, j] = mu[j] .+ Y * B[:, j] .+ M * F[:, j] .+ 0.25 .* randn(rng, n)
-    end
-    return Y, M, B, F
 end
 
 @testset "GRN.jl" begin
@@ -71,13 +53,188 @@ end
         @test isapprox(mean(x), 2.0; rtol=0.05)
     end
 
+    @testset "Simulate" begin
+        # Default parameters
+        sim = GRN.simulate(seed=1)
+        @test size(sim.Y) == (200, 10)
+        @test size(sim.M) == (200, 0)
+        @test size(sim.G) == (10, 10)
+        @test size(sim.Q) == (0, 10)
+        @test length(sim.mu) == 10
+        @test all(isfinite, sim.Y)
+
+        # G is strictly upper triangular (G[i,j] = 0 for i >= j)
+        lower_zero = all(sim.G[i, j] == 0.0 for j in 1:10 for i in j:10)
+        @test lower_zero
+
+        # With markers
+        sim = GRN.simulate(n=100, m=5, u=20, seed=42)
+        @test size(sim.Y) == (100, 5)
+        @test size(sim.M) == (100, 20)
+        @test size(sim.G) == (5, 5)
+        @test size(sim.Q) == (20, 5)
+        @test all(isfinite, sim.Y)
+        @test all(isfinite, sim.M)
+
+        # Reproducibility: same seed gives same data
+        sim1 = GRN.simulate(n=50, m=4, u=8, seed=7)
+        sim2 = GRN.simulate(n=50, m=4, u=8, seed=7)
+        @test sim1.Y == sim2.Y
+        @test sim1.M == sim2.M
+        @test sim1.G == sim2.G
+
+        # Different seeds give different data
+        sim3 = GRN.simulate(n=50, m=4, u=8, seed=8)
+        @test sim1.Y != sim3.Y
+
+        # Model check: residuals Y - mu - Y*G - M*Q have sd close to noise_sd
+        sim = GRN.simulate(n=500, m=5, u=10, seed=1, noise_sd=0.5)
+        resid = sim.Y .- sim.mu' .- sim.Y * sim.G .- sim.M * sim.Q
+        @test isapprox(std(resid), 0.5; rtol=0.15)
+
+        # User-provided G (must be strictly upper triangular)
+        G = zeros(3, 3)
+        G[1, 2] = 0.5
+        G[1, 3] = -0.3
+        G[2, 3] = 0.7
+        sim = GRN.simulate(n=50, m=3, G=G, seed=1)
+        @test sim.G == G
+        @test size(sim.Y) == (50, 3)
+
+        # Non-upper-triangular G throws
+        Gbad = zeros(3, 3)
+        Gbad[2, 1] = 0.5
+        @test_throws ArgumentError GRN.simulate(n=50, m=3, G=Gbad)
+
+        # G with wrong dimensions throws
+        @test_throws ArgumentError GRN.simulate(n=50, m=3, G=zeros(4, 4))
+
+        # User-provided M: u inferred from size
+        M = randn(80, 6)
+        sim = GRN.simulate(n=80, M=M, m=4, seed=1)
+        @test size(sim.M) == (80, 6)
+        @test size(sim.Q) == (6, 4)
+
+        # M with wrong number of rows throws
+        @test_throws ArgumentError GRN.simulate(n=50, M=randn(60, 6), m=4)
+
+        # User-provided mu
+        sim = GRN.simulate(n=50, m=3, mu=[1.0, 2.0, 3.0], seed=1)
+        @test sim.mu == [1.0, 2.0, 3.0]
+
+        # mu with wrong length throws
+        @test_throws ArgumentError GRN.simulate(n=50, m=3, mu=[1.0, 2.0])
+
+        # Simulated data works with grn
+        sim = GRN.simulate(n=50, m=3, u=4, seed=1)
+        out = joinpath(mktempdir(), "grn")
+        grn(sim.Y, sim.M, 10:10:50, outpath=out)
+        @test isfile(joinpath(out, "G_effects.tsv.gz"))
+
+        # Default: no fixed effects
+        @test size(sim.X) == (50, 0)
+        @test size(sim.Beta) == (0, 3)
+
+        # With fixed effects
+        X = [ones(50) randn(50)]
+        sim = GRN.simulate(n=50, m=3, X=X, seed=1)
+        @test size(sim.X) == (50, 2)
+        @test size(sim.Beta) == (2, 3)
+        @test all(sim.mu .== 0.0) # mu replaced by X * Beta
+
+        # Model check with fixed effects
+        sim = GRN.simulate(n=500, m=5, u=10, X=[ones(500) randn(500)], seed=1, noise_sd=0.5)
+        resid = sim.Y .- sim.X * sim.Beta .- sim.Y * sim.G .- sim.M * sim.Q
+        @test isapprox(std(resid), 0.5; rtol=0.15)
+
+        # X with wrong rows throws
+        @test_throws ArgumentError GRN.simulate(n=50, m=3, X=randn(60, 2))
+
+        # Beta with wrong dims throws
+        @test_throws ArgumentError GRN.simulate(n=50, m=3, X=randn(50, 2), Beta=zeros(3, 3))
+
+        # User-provided Beta
+        Beta = [1.0 2.0 3.0; 0.5 -0.5 0.2]
+        sim = GRN.simulate(n=50, m=3, X=randn(50, 2), Beta=Beta, seed=1)
+        @test sim.Beta == Beta
+    end
+
+    @testset "Fixed effects" begin
+        # Input checks for X
+        out = joinpath(mktempdir(), "grn")
+        Y = randn(20, 3)
+        @test_throws AssertionError grn(Y, 2:2:4; X=randn(10, 2), outpath=out)
+        @test_throws AssertionError grn(Y, 2:2:4; X=[ones(20) fill(NaN, 20)], outpath=out)
+        @test_throws AssertionError grn(Y, 2:2:4; X=zeros(20, 2), outpath=out)
+
+        # Default X is ones(n, 1): intercept is captured as a fixed effect
+        testdir = mktempdir()
+        Random.seed!(10)
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1, effect_sd=0.8, noise_sd=0.25)
+        grn(sim.Y, sim.M, 500:10:1000, outpath=joinpath(testdir, "default_x"))
+        @test isfile(joinpath(testdir, "default_x", "base_fixedeffects.tsv.gz"))
+        @test !isfile(joinpath(testdir, "default_x", "base_average.tsv.gz"))
+        # 1 fixed effect (intercept) x 5 genes = 5 values per row, 51 iterations
+        @test size(readoutput(joinpath(testdir, "default_x", "base_fixedeffects.tsv.gz"), 5)) == (51, 5)
+        # The intercept captures the per-gene mean of the simulated data
+        intercept_flat = vec(mean(readoutput(joinpath(testdir, "default_x", "base_fixedeffects.tsv.gz"), 5), dims=1))
+        @test cor(intercept_flat, sim.mu) > 0.8
+
+        # User-provided X with multiple fixed effects
+        X = [ones(200) randn(200) rand(200) .> 0.5]
+        sim = GRN.simulate(n=200, m=5, u=10, X=X, seed=1, effect_sd=0.8, noise_sd=0.25)
+        grn(sim.Y, sim.M, 500:10:1000; X=sim.X, outpath=joinpath(testdir, "fe"))
+        @test isfile(joinpath(testdir, "fe", "base_fixedeffects.tsv.gz"))
+        @test !isfile(joinpath(testdir, "fe", "base_average.tsv.gz"))
+        @test isfile(joinpath(testdir, "fe", "G_effects.tsv.gz"))
+        @test isfile(joinpath(testdir, "fe", "Q_effects.tsv.gz"))
+        # 3 fixed effects x 5 genes = 15 values per row, 51 iterations
+        @test size(readoutput(joinpath(testdir, "fe", "base_fixedeffects.tsv.gz"), 15)) == (51, 15)
+
+        # Recovery of fixed effects: posterior mean close to truth
+        Beta_flat = vec(mean(readoutput(joinpath(testdir, "fe", "base_fixedeffects.tsv.gz"), 15), dims=1))
+        Beta_hat = reshape(Beta_flat, 3, 5) # Beta_hat[k, c] = coefficient of fixed effect k for gene c
+        @test cor(vec(Beta_hat), vec(sim.Beta)) > 0.9
+
+        # Recovery of network with fixed effects present
+        Gflat = vec(mean(readoutput(joinpath(testdir, "fe", "G_effects.tsv.gz"), 25), dims=1))
+        Ghat = reshape(Gflat, 5, 5)' # Ghat[j, q] is the effect of gene q on gene j
+        @test cor(vec(Ghat), vec(sim.G')) > 0.7
+
+        # Fixed effects sampler is allocation-free
+        sim2 = GRN.simulate(n=100, m=4, X=randn(100, 3), seed=1)
+        d = GRN.create_databucket(sim2.Y, zeros(100, 0), (individuals=100, genes=4, loci=0),
+            GRN.SpikeSlab(), GRN.SpikeSlab(), sim2.X)
+        @test length(d.out.base.fixedeffects) == 4
+        @test all(length(b) == 3 for b in d.out.base.fixedeffects)
+        f_fe() = GRN._sample_fixedeffects!(d, 1)
+        f_fe(); f_fe()
+        @test (@allocated f_fe()) == 0
+
+        # Without X: defaults to ones(n, 1) — intercept only
+        d2 = GRN.create_databucket(sim2.Y, zeros(100, 0), (individuals=100, genes=4, loci=0),
+            GRN.SpikeSlab(), GRN.SpikeSlab())
+        @test length(d2.in.X) == 1
+        @test all(d2.in.X[1] .== 1.0)
+        @test length(d2.out.base.fixedeffects) == 4
+        @test all(length(b) == 1 for b in d2.out.base.fixedeffects)
+
+        # grn works with X and no genotypes (convenience method)
+        sim3 = GRN.simulate(n=100, m=3, X=[ones(100) randn(100)], seed=2)
+        out3 = joinpath(mktempdir(), "grn")
+        grn(sim3.Y, 10:10:50; X=sim3.X, outpath=out3)
+        @test isfile(joinpath(out3, "base_fixedeffects.tsv.gz"))
+        @test !isfile(joinpath(out3, "base_average.tsv.gz"))
+        @test !isfile(joinpath(out3, "Q_effects.tsv.gz"))
+    end
+
     @testset "Priors are inserted" begin
-        Y, M, = simulate(50, 3, 4)
+        sim = GRN.simulate(n=50, m=3, u=4, seed=1)
+        Y, M = sim.Y, sim.M
         d = GRN.create_databucket(Y, M, (individuals=50, genes=3, loci=4),
             GRN.SpikeSlab(), GRN.SpikeSlab())
-        GRN.insert_priors!(d, (mu=[1.0, 2.0, 3.0], Rvar=0.5, Gpi=0.2, Gvar=0.3,
+        GRN.insert_priors!(d, (Rvar=0.5, Gpi=0.2, Gvar=0.3,
             Gvardf=6.0, Qpi=0.4, Rvardf=5.0))
-        @test d.out.base.average == [1.0, 2.0, 3.0]
         @test all(d.out.base.residual_variance .== 0.5)
         @test all(d.out.G.pi .== 0.2)
         @test all(d.out.G.var .== 0.3)
@@ -92,7 +249,8 @@ end
     @testset "Analysis and output" begin
         testdir = mktempdir()
         Random.seed!(2)
-        Y, M, B, = simulate()
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1, effect_sd=0.8, noise_sd=0.25)
+        Y, M, B = sim.Y, sim.M, sim.G
 
         # Run all prior combinations (compressed by default)
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "ss"))
@@ -108,7 +266,7 @@ end
         @test size(readoutput(joinpath(testdir, "ss", "G_pi.tsv.gz"), 5)) == (51, 5)
         @test size(readoutput(joinpath(testdir, "ss", "G_variance.tsv.gz"), 5)) == (51, 5)
         @test size(readoutput(joinpath(testdir, "ss", "Q_effects.tsv.gz"), 50)) == (51, 50)
-        @test size(readoutput(joinpath(testdir, "ss", "base_average.tsv.gz"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "ss", "base_fixedeffects.tsv.gz"), 5)) == (51, 5)
         @test all(isfinite, readoutput(joinpath(testdir, "ss", "G_variance.tsv.gz"), 5))
 
         # Laplace output
@@ -140,7 +298,8 @@ end
     @testset "Compressed output (default)" begin
         testdir = mktempdir()
         Random.seed!(5)
-        Y, M, = simulate()
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1)
+        Y, M = sim.Y, sim.M
 
         # Run without specifying compress — default is compressed
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "default"))
@@ -150,7 +309,7 @@ end
         @test isfile(joinpath(testdir, "default", "G_pi.tsv.gz"))
         @test isfile(joinpath(testdir, "default", "G_variance.tsv.gz"))
         @test isfile(joinpath(testdir, "default", "Q_effects.tsv.gz"))
-        @test isfile(joinpath(testdir, "default", "base_average.tsv.gz"))
+        @test isfile(joinpath(testdir, "default", "base_fixedeffects.tsv.gz"))
         @test isfile(joinpath(testdir, "default", "base_residual_variance.tsv.gz"))
         @test !isfile(joinpath(testdir, "default", "G_effects.tsv"))
         @test !isfile(joinpath(testdir, "default", "Q_effects.tsv"))
@@ -164,7 +323,7 @@ end
         @test size(readoutput(joinpath(testdir, "default", "G_pi.tsv.gz"), 5)) == (51, 5)
         @test size(readoutput(joinpath(testdir, "default", "G_variance.tsv.gz"), 5)) == (51, 5)
         @test size(readoutput(joinpath(testdir, "default", "Q_effects.tsv.gz"), 50)) == (51, 50)
-        @test size(readoutput(joinpath(testdir, "default", "base_average.tsv.gz"), 5)) == (51, 5)
+        @test size(readoutput(joinpath(testdir, "default", "base_fixedeffects.tsv.gz"), 5)) == (51, 5)
 
         # All values are finite
         @test all(isfinite, readoutput(joinpath(testdir, "default", "G_effects.tsv.gz"), 25))
@@ -186,7 +345,8 @@ end
     @testset "Plain output (compress=false)" begin
         testdir = mktempdir()
         Random.seed!(6)
-        Y, M, = simulate()
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1)
+        Y, M = sim.Y, sim.M
 
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "plain"), compress=false)
 
@@ -194,7 +354,7 @@ end
         @test isfile(joinpath(testdir, "plain", "G_effects.tsv"))
         @test isfile(joinpath(testdir, "plain", "G_pi.tsv"))
         @test isfile(joinpath(testdir, "plain", "Q_effects.tsv"))
-        @test isfile(joinpath(testdir, "plain", "base_average.tsv"))
+        @test isfile(joinpath(testdir, "plain", "base_fixedeffects.tsv"))
         @test !isfile(joinpath(testdir, "plain", "G_effects.tsv.gz"))
         @test !isfile(joinpath(testdir, "plain", "Q_effects.tsv.gz"))
 
@@ -215,7 +375,8 @@ end
     @testset "PIP and derive_indicator" begin
         testdir = mktempdir()
         Random.seed!(8)
-        Y, M, = simulate()
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1)
+        Y, M = sim.Y, sim.M
 
         # Run analysis (compressed by default, indicator files are never written)
         grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "run"))
@@ -271,10 +432,130 @@ end
         @test all(0.0 .<= q_pip .<= 1.0)
     end
 
+    @testset "Binary output (format=:bin)" begin
+        testdir = mktempdir()
+        Random.seed!(9)
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1, effect_sd=0.8, noise_sd=0.25)
+        Y, M = sim.Y, sim.M
+
+        # --- Compressed binary (.bin.gz) ---
+        Random.seed!(9)
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "bin"),
+            format=:bin, compress=true)
+
+        # Correct extensions
+        @test isfile(joinpath(testdir, "bin", "G_effects.bin.gz"))
+        @test isfile(joinpath(testdir, "bin", "Q_effects.bin.gz"))
+        @test isfile(joinpath(testdir, "bin", "G_pi.bin.gz"))
+        @test isfile(joinpath(testdir, "bin", "base_fixedeffects.bin.gz"))
+        @test !isfile(joinpath(testdir, "bin", "G_effects.tsv.gz"))
+        @test !isfile(joinpath(testdir, "bin", "G_effects.bin"))
+
+        # --- Uncompressed binary (.bin) ---
+        Random.seed!(9)
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "bin_raw"),
+            format=:bin, compress=false)
+
+        @test isfile(joinpath(testdir, "bin_raw", "G_effects.bin"))
+        @test isfile(joinpath(testdir, "bin_raw", "Q_effects.bin"))
+        @test !isfile(joinpath(testdir, "bin_raw", "G_effects.bin.gz"))
+        @test !isfile(joinpath(testdir, "bin_raw", "G_effects.tsv"))
+
+        # --- read_binary: correct dimensions ---
+        G_bin = GRN.read_binary(joinpath(testdir, "bin", "G_effects.bin.gz"))
+        @test size(G_bin) == (51, 25)  # 51 iterations x 25 values (5x5)
+        @test eltype(G_bin) == Float64
+        @test all(isfinite, G_bin)
+
+        Q_bin = GRN.read_binary(joinpath(testdir, "bin_raw", "Q_effects.bin"))
+        @test size(Q_bin) == (51, 50)  # 51 iterations x 50 values (5x10)
+
+        pi_bin = GRN.read_binary(joinpath(testdir, "bin", "G_pi.bin.gz"))
+        @test size(pi_bin) == (51, 5)   # 51 iterations x 5 genes
+
+        fe_bin = GRN.read_binary(joinpath(testdir, "bin", "base_fixedeffects.bin.gz"))
+        @test size(fe_bin) == (51, 5)   # 51 iterations x 5 genes (1 fixed effect)
+
+        # --- Binary vs TSV: same values ---
+        Random.seed!(9)
+        grn(Y, M, 500:10:1000, outpath=joinpath(testdir, "tsv"),
+            format=:tsv, compress=true)
+
+        G_tsv = readoutput(joinpath(testdir, "tsv", "G_effects.tsv.gz"), 25)
+        @test size(G_tsv) == size(G_bin)
+        @test G_tsv ≈ G_bin rtol=1e-9  # TSV has %.10g precision
+
+        # --- posterior_mean works with binary ---
+        pm_bin = GRN.posterior_mean(joinpath(testdir, "bin", "G_effects.bin.gz"))
+        @test length(pm_bin) == 25
+        @test all(isfinite, pm_bin)
+
+        pm_bin_raw = GRN.posterior_mean(joinpath(testdir, "bin_raw", "G_effects.bin"))
+        @test pm_bin ≈ pm_bin_raw  # compressed and uncompressed give same result
+
+        # Compare with TSV posterior_mean
+        pm_tsv = GRN.posterior_mean(joinpath(testdir, "tsv", "G_effects.tsv.gz"))
+        @test pm_bin ≈ pm_tsv rtol=1e-9
+
+        # --- posterior_inclusion_probability works with binary ---
+        pip_bin = GRN.posterior_inclusion_probability(
+            joinpath(testdir, "bin", "G_effects.bin.gz"))
+        @test length(pip_bin) == 25
+        @test all(0.0 .<= pip_bin .<= 1.0)
+
+        # Diagonal always zero
+        diag_idx = [1, 7, 13, 19, 25]
+        @test all(pip_bin[diag_idx] .== 0.0)
+
+        # Compare with TSV PIP
+        pip_tsv = GRN.posterior_inclusion_probability(
+            joinpath(testdir, "tsv", "G_effects.tsv.gz"))
+        @test pip_bin ≈ pip_tsv
+
+        # --- derive_indicator works with binary ---
+        ind_bin = GRN.derive_indicator(joinpath(testdir, "bin", "G_effects.bin.gz"))
+        @test ind_bin isa BitVector
+        @test length(ind_bin) == 25
+        @test all(ind_bin .== (pip_bin .> 0.5))
+
+        # --- accuracy works with binary ---
+        # B.csv is 10x10 but sim.G is 5x5; use a matching truth file
+        B_truth = joinpath(testdir, "B_truth.csv")
+        writedlm(B_truth, sim.G', ',')
+        acc_bin = GRN.accuracy(B_truth, joinpath(testdir, "bin", "G_effects.bin.gz"))
+        acc_tsv = GRN.accuracy(B_truth, joinpath(testdir, "tsv", "G_effects.tsv.gz"))
+        @test acc_bin isa Float64
+        @test acc_bin ≈ acc_tsv rtol=1e-9
+
+        # --- Invalid format throws ---
+        @test_throws ArgumentError grn(Y, M, 2:2:4,
+            outpath=joinpath(testdir, "bad"), format=:csv)
+
+        # --- Corrupt binary file throws ---
+        corrupt = joinpath(testdir, "corrupt.bin")
+        write(corrupt, "NOT A GRN BINARY FILE AT ALL")
+        @test_throws ErrorException GRN.read_binary(corrupt)
+
+        # --- Binary write allocates minimally ---
+        # The binary write path should not allocate per element
+        d = GRN.create_databucket(Y, M, (individuals=200, genes=5, loci=10),
+            GRN.SpikeSlab(), GRN.SpikeSlab())
+        ofiles = GRN.makeout(joinpath(testdir, "alloc_test"),
+            GRN._outputs(d, 10); force=true, format=:bin, compress=false)
+        f_write() = GRN.write_output(ofiles[1])  # G_effects
+        f_write(); f_write()
+        alloc = @allocated f_write()
+        GRN.close_outputs(ofiles)
+        # Binary write of 25 Float64 should allocate very little
+        # (buffer flush may allocate when crossing _BUFSIZE threshold)
+        @test alloc < 4096  # generous bound for buffer management
+    end
+
     @testset "Allocations" begin
         # The per-gene Gibbs updates must not allocate
         Random.seed!(4)
-        Y, M, = simulate(100, 4, 6)
+        sim = GRN.simulate(n=100, m=4, u=6, seed=1)
+        Y, M = sim.Y, sim.M
         d = GRN.create_databucket(Y, M, (individuals=100, genes=4, loci=6),
             GRN.SpikeSlab(), GRN.SpikeSlab())
         ssqs = (M=[dot(m, m) for m in d.in.M], Y=[dot(y, y) for y in d.in.Y])
@@ -282,7 +563,7 @@ end
 
         f() = begin
             for c in 1:4
-                GRN._sample_mean!(d, c, 100)
+                GRN._sample_fixedeffects!(d, c)
                 GRN._sample_residualvariance!(d, c)
                 GRN._sample_effects_gene!(d.out.G, c, d.in.Y, ssqs.Y, d.in.R, rv)
                 GRN._sample_hyperparameters_gene!(d.out.G, c, rv)
